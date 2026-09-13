@@ -89,10 +89,10 @@ export const runtimeProcessEntrypoints = {
     sourceWorkerName: "../config/sessions/session-accessor.sqlite-archive.worker",
     distWorkerPath: "config/sessions/session-accessor.sqlite-archive.worker.js",
   },
-  sessionModelContext: {
+  sessionTranscript: {
     currentModuleUrl,
-    sourceWorkerName: "../config/sessions/session-model-context.worker",
-    distWorkerPath: "config/sessions/session-model-context.worker.js",
+    sourceWorkerName: "../config/sessions/session-transcript.worker",
+    distWorkerPath: "config/sessions/session-transcript.worker.js",
   },
   sessionTranscriptReconcile: {
     currentModuleUrl,

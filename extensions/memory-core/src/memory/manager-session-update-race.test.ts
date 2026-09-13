@@ -5,8 +5,13 @@ import { resolveSessionTranscriptsDirForAgent } from "openclaw/plugin-sdk/memory
 import { listSessionTranscriptCorpusEntriesForAgent } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import type { MemorySessionSyncTarget } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { deleteSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
-import { appendSessionTranscriptMessageByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
+import {
+  appendSessionTranscriptMessageByIdentity,
+  readSessionTranscriptEvents,
+} from "openclaw/plugin-sdk/session-transcript-runtime";
 import { resolveOpenClawAgentSqlitePath } from "openclaw/plugin-sdk/sqlite-runtime";
+import { appendSqliteSessionTranscriptEventForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
+import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   recordMemoryEntryOrigins,
@@ -66,6 +71,77 @@ describe("memory session update sync", () => {
         .all("violet", sessionPath),
     ).toEqual([]);
   }
+
+  it("preserves reset recall boundaries when indexing a SQLite session update", async () => {
+    const sessionId = "reset-index-boundary";
+    const sessionKey = `agent:main:chat:${sessionId}`;
+    const target = {
+      agentId: "main",
+      sessionId,
+      sessionKey,
+      storePath: path.join(resolveSessionTranscriptsDirForAgent("main"), "sessions.json"),
+    };
+    await seedSessionTranscript({
+      sessionId,
+      sessionKey,
+      messages: [
+        { role: "user", timestamp: 1, content: "Earlier owner preference.", senderIsOwner: true },
+        { role: "assistant", timestamp: 2, content: "Earlier derived answer." },
+        { role: "user", timestamp: 3, content: "Retained owner preference.", senderIsOwner: true },
+        { role: "assistant", timestamp: 4, content: "Retained derived answer." },
+      ],
+    });
+    const manager = await getFreshManager(
+      createConfig({ provider: "none", sources: ["sessions"], sessionMemory: true }),
+      "cli",
+    );
+    await manager.sync({ reason: "before-reset", force: true });
+    const messages = (await readSessionTranscriptEvents(target)).flatMap((record, index) => {
+      const event = asOptionalRecord(record);
+      return event?.type === "message" && typeof event.id === "string"
+        ? [{ id: event.id, line: index + 1 }]
+        : [];
+    });
+    expect(messages).toHaveLength(4);
+    await appendSqliteSessionTranscriptEventForTest({
+      ...target,
+      event: {
+        type: "reset",
+        id: "reset-boundary",
+        parentId: messages[3]!.id,
+        firstKeptEntryId: messages[2]!.id,
+        reason: "reset",
+        timestamp: "2026-09-01T00:00:00.000Z",
+      },
+    });
+    await manager.sync({ reason: "after-reset", sessions: [{ sessionId, sessionKey }] });
+
+    const observer = new DatabaseSync(resolveOpenClawAgentSqlitePath({ agentId: "main" }), {
+      readOnly: true,
+    });
+    try {
+      const chunks = observer
+        .prepare(
+          "SELECT start_line, end_line, text FROM memory_index_chunks WHERE source = 'sessions' AND path = ? ORDER BY start_line, end_line",
+        )
+        .all(`sessions/main/${sessionId}.jsonl`);
+      expect(chunks).toEqual([
+        {
+          start_line: messages[0]!.line,
+          end_line: messages[1]!.line,
+          text: "User: Earlier owner preference.\nAssistant: Earlier derived answer.",
+        },
+        {
+          start_line: messages[2]!.line,
+          end_line: messages[3]!.line,
+          text: "User: Retained owner preference.\nAssistant: Retained derived answer.",
+        },
+      ]);
+    } finally {
+      observer.close();
+    }
+    expect(manager.status().dirty).toBe(false);
+  });
 
   it("indexes an update that arrives before an active sync clears dirty state", async () => {
     const sessionId = "session-update-during-sync";
@@ -426,10 +502,20 @@ describe("memory session update sync", () => {
     }
     const manager = await getFreshManager(cfg, "cli", true);
     let releaseEmbedding = () => {};
+    const embeddingGate = new Promise<void>((resolve) => {
+      releaseEmbedding = resolve;
+    });
+    let privateSourceEntered = () => {};
+    const privateSourceReady = new Promise<void>((resolve) => {
+      privateSourceEntered = resolve;
+    });
     if (!repeatPurge) {
-      fixture.provider.providerRuntimeBatchGate = new Promise<void>((resolve) => {
-        releaseEmbedding = resolve;
-      });
+      fixture.provider.providerRuntimeBatchEntered = (_activeCalls, texts) => {
+        if (texts.some((text) => text.includes("Private violet alpha fragment"))) {
+          fixture.provider.providerRuntimeBatchGate = embeddingGate;
+          privateSourceEntered();
+        }
+      };
     }
     let purge: ReturnType<typeof forgetMemoryEntries> | undefined;
     const activeSync = manager.sync({
@@ -442,9 +528,11 @@ describe("memory session update sync", () => {
         }
       },
     });
+    void activeSync.catch(() => undefined);
     try {
       if (!repeatPurge) {
-        await vi.waitFor(() => expect(fixture.provider.providerRuntimeActiveBatchCalls).toBe(1));
+        await Promise.race([privateSourceReady, activeSync]);
+        expect(fixture.provider.providerRuntimeBatchGate).toBe(embeddingGate);
         await forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] });
         releaseEmbedding();
       }
@@ -472,6 +560,7 @@ describe("memory session update sync", () => {
       await activeSync.catch(() => undefined);
       await purge?.catch(() => undefined);
       fixture.provider.providerRuntimeBatchGate = null;
+      fixture.provider.providerRuntimeBatchEntered = null;
     }
   });
 
