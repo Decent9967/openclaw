@@ -60,6 +60,7 @@ function createHistoryProgressPane(request: GatewayRequestHandler) {
   state.settings = { sessionKey: "notes", lastActiveSessionKey: "notes" } as typeof state.settings;
   const progress = (pane as TestChatPane & { progressCard: SessionProgressCardController })
     .progressCard;
+  progress.hostConnected();
   onTestFinished(() => progress.hostDisconnected());
   const emit = (card: ProgressCard) => {
     const gateway = pane.context.gateway as ApplicationContext["gateway"] & {
