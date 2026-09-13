@@ -54,7 +54,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
                     $0.accessibilityLabel?() == "Model and reasoning"
             })
 
-            try self.press(button) { menu in
+            try AppKitTestSupport.pressMenu(button) { menu in
                 try Self.record(menu: menu, content: content, name: "catalog")
                 let provider = try XCTUnwrap(menu.items.first { $0.submenu != nil })
                 let choices = try XCTUnwrap(provider.submenu)
@@ -76,7 +76,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             XCTAssertEqual(model.selectedModelSelectionID, "fixture/allowed")
             XCTAssertEqual(model.displayedModelSelectionID, "fixture/allowed")
 
-            try self.press(button) { menu in
+            try AppKitTestSupport.pressMenu(button) { menu in
                 try Self.record(menu: menu, content: content, name: "selected")
                 let provider = try XCTUnwrap(menu.items.first { $0.submenu != nil })
                 let selected = try XCTUnwrap(provider.submenu?.items.first {
@@ -88,7 +88,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             }
             XCTAssertEqual(model.selectedThinkingLevel, "high")
             XCTAssertTrue(model.modelControlLabel.contains("Thorough"))
-            try self.press(button) { menu in
+            try AppKitTestSupport.pressMenu(button) { menu in
                 try Self.record(menu: menu, content: content, name: "effort")
                 let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
                 XCTAssertEqual(speed.items.map(\.title), ["Session default", "Fast", "Normal"])
@@ -100,7 +100,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             XCTAssertTrue(model.speed.isEnabled)
             XCTAssertEqual(model.speed.override, .on)
             XCTAssertTrue(model.modelControlLabel.contains("Fast"))
-            try self.press(button) { menu in
+            try AppKitTestSupport.pressMenu(button) { menu in
                 try Self.record(menu: menu, content: content, name: "fast")
                 let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
                 XCTAssertEqual(speed.items[1].state, .on)
@@ -110,7 +110,7 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
             XCTAssertNil(model.speed.override)
             XCTAssertFalse(model.speed.isEnabled)
             XCTAssertEqual(model.selectedThinkingLevel, "high")
-            try self.press(button) { menu in
+            try AppKitTestSupport.pressMenu(button) { menu in
                 try Self.record(menu: menu, content: content, name: "inherited")
                 let speed = try XCTUnwrap(menu.items.first { $0.title == "Speed" }?.submenu)
                 XCTAssertEqual(speed.items.map(\.state), [.on, .off, .off])
@@ -139,16 +139,6 @@ final class QuickChatCatalogPresentationTests: XCTestCase {
         observation.stop()
         XCTAssertEqual(result, .completed)
         XCTAssertTrue(condition())
-    }
-
-    private func press(_ button: AnyObject, inspect: @escaping (NSMenu) throws -> Void) throws {
-        let tracking = QuickChatCatalogMenuTracking(inspect: inspect)
-        tracking.start()
-        defer { tracking.stop() }
-        XCTAssertTrue(button.accessibilityPerformPress?() == true)
-        XCTAssertTrue(tracking.observed, "Pressing the rendered control must open its native menu")
-        XCTAssertFalse(tracking.timedOut, "The menu must finish before its tracking deadline")
-        if let error = tracking.error { throw error }
     }
 
     private static func record(menu: NSMenu, content: NSView, name: String) throws {
@@ -302,69 +292,5 @@ private final class QuickChatCatalogObservation {
 
     func stop() {
         self.stopped = true
-    }
-}
-
-@MainActor
-private final class QuickChatCatalogMenuTracking: NSObject {
-    let inspect: (NSMenu) throws -> Void
-    private(set) var observed = false
-    private(set) var timedOut = false
-    private(set) var error: Error?
-    private var menu: NSMenu?
-    private var inspection: Timer?
-    private var deadline: Timer?
-
-    init(inspect: @escaping (NSMenu) throws -> Void) {
-        self.inspect = inspect
-    }
-
-    func start() {
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(self.beganTracking(_:)),
-            name: NSMenu.didBeginTrackingNotification, object: nil)
-    }
-
-    @objc private func beganTracking(_ notification: Notification) {
-        guard !self.observed, let menu = notification.object as? NSMenu else { return }
-        self.observed = true
-        self.menu = menu
-        // AppKit tracks menus in a nested run loop. Schedule both inspection and cancellation there.
-        let inspection = Timer(
-            timeInterval: 0,
-            target: self,
-            selector: #selector(self.inspectMenu),
-            userInfo: nil,
-            repeats: false)
-        let deadline = Timer(
-            timeInterval: 3,
-            target: self,
-            selector: #selector(self.expire),
-            userInfo: nil,
-            repeats: false)
-        self.inspection = inspection
-        self.deadline = deadline
-        for timer in [inspection, deadline] {
-            RunLoop.main.add(timer, forMode: .eventTracking)
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
-
-    @objc private func inspectMenu() {
-        guard let menu = self.menu else { return }
-        defer { menu.cancelTrackingWithoutAnimation() }
-        do { try self.inspect(menu) } catch { self.error = error }
-    }
-
-    @objc private func expire() {
-        self.timedOut = true
-        self.menu?.cancelTrackingWithoutAnimation()
-    }
-
-    func stop() {
-        self.inspection?.invalidate()
-        self.deadline?.invalidate()
-        self.menu?.cancelTrackingWithoutAnimation()
-        NotificationCenter.default.removeObserver(self)
     }
 }
