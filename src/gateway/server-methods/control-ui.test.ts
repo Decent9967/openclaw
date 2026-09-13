@@ -49,6 +49,7 @@ describe("controlUi.githubPreview", () => {
   it("uses the selected agent's Settings identity for public metadata", async () => {
     vi.stubEnv("GH_TOKEN", "");
     vi.stubEnv("GITHUB_TOKEN", "");
+    const assertSelected = vi.fn();
     const identity = {
       token: "selected-agent-github-token",
       selection: {
@@ -57,8 +58,12 @@ describe("controlUi.githubPreview", () => {
         accountId: 101,
       },
       cacheScope: "selected-agent-preview",
-      assertSelected: vi.fn(),
+      assertSelected,
       revalidate: vi.fn().mockResolvedValue(undefined),
+      start: async <T>(start: () => T): Promise<Awaited<T>> => {
+        assertSelected();
+        return await start();
+      },
     };
     const prepare = vi
       .spyOn(githubIdentity, "prepareGitHubReadIdentity")
@@ -469,10 +474,7 @@ describe("controlUi.sessionPullRequests.subscribe", () => {
   });
 
   it("acknowledges a subscription before its cold snapshots finish loading", async () => {
-    let finishHydration!: () => void;
-    const hydration = new Promise<void>((resolve) => {
-      finishHydration = resolve;
-    });
+    const { promise: hydration, resolve: finishHydration } = createDeferred();
     const replace = vi.fn(() => hydration);
     const handlers = createControlUiHandlers(vi.fn());
     const respond = vi.fn<RespondFn>();

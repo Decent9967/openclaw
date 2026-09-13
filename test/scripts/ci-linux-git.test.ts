@@ -464,9 +464,10 @@ function runQaGitCase(profile: QaGitCase, fetchResults: FetchResult[]) {
       step: profile.step,
     },
     fetchResults,
-    // Preserve real 120-second/no-deadline calls and real cleanup; readiness,
-    // not a sleep, ensures every successful Git leader leaves two live writers.
+    // Keep real command deadlines and ready descendant cleanup; these boundary
+    // checks do not need the TERM grace covered by the owner lifecycle tests.
     realClock: true,
+    realDrain: false,
     poisonPython: true,
     env: {
       EXPECTED_SHA: candidate,
@@ -1245,10 +1246,10 @@ const agentPush = [
   "HEAD:main",
 ];
 const agentCommitCommands = [
-  ["diff", "--quiet"],
+  ["diff", "HEAD", "--quiet"],
   ["config", "user.name", "openclaw-docs-agent[bot]"],
   ["config", "user.email", "openclaw-docs-agent[bot]@users.noreply.github.com"],
-  ["add", "docs", "README.md", "CHANGELOG.md"],
+  ["add", "docs", "README.md", "CHANGELOG"],
   ["commit", "--no-verify", "-m", "docs: refresh documentation"],
 ];
 const agentOutput = (reviewBase = base) =>
@@ -1391,10 +1392,10 @@ posixIt(
   "Docs Agent no-change commit owns diff before successful exit",
   async () => {
     const report = await runDocsAgent(agentCommit, {
-      commandResults: { "diff --quiet": { code: 0 } },
+      commandResults: { "diff HEAD --quiet": { code: 0 } },
     });
     expect(report.code, report.output).toBe(0);
-    expect(gitArgs(report)).toEqual([["diff", "--quiet"]]);
+    expect(gitArgs(report)).toEqual([["diff", "HEAD", "--quiet"]]);
     expect(report.output).toBe("No docs changes.\n");
   },
   55_000,
@@ -1404,7 +1405,7 @@ posixIt.each([23, 125, "hang"] satisfies FetchResult[])(
   "Docs Agent commit drains diff before config/commit and failed fetch before retry (%s)",
   async (failure) => {
     const report = await runDocsAgent(agentCommit, {
-      commandResults: { "diff --quiet": { code: failure === 125 ? 125 : 1 } },
+      commandResults: { "diff HEAD --quiet": { code: failure === 125 ? 125 : 1 } },
       fetchResults: [failure, 0],
     });
     expect(report.code, report.output).toBe(0);
@@ -1505,8 +1506,10 @@ posixIt.each(["gate", "commit fetch", "commit push"])(
 
 const agentProducers = [
   ["ls-files", "--others", "--exclude-standard"],
-  ["diff", "--name-status", "--diff-filter=AD"],
-  ["diff", "--name-only"],
+  ["diff", "HEAD", "--name-status", "--diff-filter=AD"],
+  ["diff", "--cached", "HEAD", "--name-status", "--diff-filter=AD"],
+  ["diff", "HEAD", "--name-only"],
+  ["diff", "--cached", "HEAD", "--name-only"],
 ];
 posixIt.each(agentProducers.map((args, index) => ({ args, index })))(
   "Docs Agent enforcement stops on failed producer $args before consuming partial output",

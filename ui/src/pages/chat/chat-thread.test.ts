@@ -22,7 +22,7 @@ import {
   getExpandedToolCards,
   getExpandedUserMessages,
   persistedMessageEntryId,
-  readPendingSendFailure,
+  readPendingSendStatus,
   resetChatThreadState,
   setExpansionState,
   syncToolCardExpansionState,
@@ -159,27 +159,28 @@ function toolMessage(
   return chatMessage("tool", content, timestamp, { toolCallId, toolName, ...overrides });
 }
 
-it.each(["workspaceSyncPendingRunIds", "workerSetupPendingRunIds"] as const)(
-  "invalidates cached custody notices when %s ownership changes",
-  (property) => {
-    const pendingInputs = [
-      {
-        acceptedAt: 1,
-        id: "pending-follow-up",
-        message: userMessage("continue", 1),
-        runId: "follow-up-run",
-        state: "queued" as const,
-      },
-    ];
-    const waiting = buildCachedChatItems(
-      createProps({ pendingInputs, [property]: ["follow-up-run"] }),
-    );
-    const active = buildCachedChatItems(createProps({ pendingInputs }));
+it("invalidates cached custody notices when workspace sync ownership changes", () => {
+  const pendingInputs = [
+    {
+      acceptedAt: 1,
+      id: "pending-follow-up",
+      message: userMessage("continue", 1),
+      runId: "follow-up-run",
+      state: "queued" as const,
+    },
+  ];
+  const input = createProps({ pendingInputs });
+  const waiting = buildCachedChatItems({
+    ...input,
+    workspaceSyncPendingRunIds: ["follow-up-run"],
+  });
+  const active = buildCachedChatItems(input);
 
-    expect(waiting.some((item) => item.kind === "notice")).toBe(true);
-    expect(active.some((item) => item.kind === "notice")).toBe(false);
-  },
-);
+  expect(waiting.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual([
+    "Received · waiting for workspace sync",
+  ]);
+  expect(active.filter((item) => item.kind === "notice")).toEqual([]);
+});
 
 function queuedSend(
   id: string,
@@ -4275,7 +4276,9 @@ describe("buildCachedChatItems", () => {
 
     expect(
       messageGroups({
-        queue: [{ ...restored, sendAttempts: 0, sendState: "waiting-reconnect" }],
+        queue: [
+          { ...restored, sendAttempts: 0, sendSubmittedAtMs: 10, sendState: "waiting-reconnect" },
+        ],
       }),
     ).toStrictEqual([]);
     for (const sendState of ["waiting-reconnect", "sending"] as const) {
@@ -4403,7 +4406,7 @@ describe("buildCachedChatItems", () => {
           error: "Delivery diagnostic",
         },
       });
-      expect(readPendingSendFailure(message)).toEqual({
+      expect(readPendingSendStatus(message)).toEqual({
         id: "attempted-send-1",
         state: sendState,
         error: "Delivery diagnostic",
@@ -4600,6 +4603,7 @@ describe("buildCachedChatItems", () => {
         }),
         queuedSend("queued-future-turn", "Later request", 2_001, "waiting-reconnect", {
           sendSubmittedAtMs: 2_001,
+          sendAttempts: 1,
         }),
       ],
       toolMessages: [mcpAppResult("mcp-app-queued", "call-queued", 2_002)],
@@ -5378,6 +5382,26 @@ describe("user message expansion state", () => {
 });
 
 describe("thread item cache", () => {
+  it("repositions an initial placement prompt when recovery identifies its existing queue row", () => {
+    const queued = queuedSend("initial", "Original request", 10_000, "failed", {
+      sendRunId: "initial",
+      sendAttempts: 1,
+    });
+    const input = createProps({
+      messages: [assistantMessage("Gateway recovery", 2)],
+      queue: [queued],
+    });
+    const roles = (items: ReturnType<typeof buildCachedChatItems>) =>
+      items.filter((item) => item.kind === "group").map((item) => item.role);
+
+    expect(roles(buildCachedChatItems(input))).toEqual(["assistant", "user"]);
+    expect(roles(buildCachedChatItems({ ...input, initialTurnId: queued.id }))).toEqual([
+      "user",
+      "assistant",
+    ]);
+    expect(roles(buildCachedChatItems(input))).toEqual(["assistant", "user"]);
+  });
+
   it("sender provenance refreshes reply display without changing the person", () => {
     resetChatThreadState();
     const alice = userMessage("first", 1, {
