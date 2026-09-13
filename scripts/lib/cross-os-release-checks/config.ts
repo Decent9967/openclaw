@@ -200,7 +200,7 @@ function shouldSeedProviderConfigModels(providerMeta: ProviderConfig) {
   );
 }
 
-export function buildReleaseProviderConfigOverride(providerMeta: ProviderConfig) {
+function buildReleaseProviderConfigOverride(providerMeta: ProviderConfig) {
   if (!shouldSeedProviderConfigModels(providerMeta)) {
     return null;
   }
@@ -215,14 +215,14 @@ export function buildReleaseProviderConfigOverride(providerMeta: ProviderConfig)
 }
 
 // Yield between awaited commands so failed setup does not inspect later configuration.
-export function* buildReleaseModelConfigCommands(providerConfig: ProviderConfig) {
-  yield ["models", "set", providerConfig.model];
-  const providerConfigOverride = buildReleaseProviderConfigOverride(providerConfig);
+export function* buildReleaseModelConfigCommands(providerMeta: ProviderConfig) {
+  yield ["models", "set", providerMeta.model];
+  const providerConfigOverride = buildReleaseProviderConfigOverride(providerMeta);
   if (providerConfigOverride) {
     yield [
       "config",
       "set",
-      `models.providers.${providerConfig.extensionId}`,
+      `models.providers.${providerMeta.extensionId}`,
       JSON.stringify(providerConfigOverride),
       "--strict-json",
       "--merge",
@@ -232,7 +232,7 @@ export function* buildReleaseModelConfigCommands(providerConfig: ProviderConfig)
     "config",
     "set",
     "plugins.allow",
-    JSON.stringify(buildCrossOsReleaseSmokePluginAllowlist(providerConfig)),
+    JSON.stringify(buildCrossOsReleaseSmokePluginAllowlist(providerMeta)),
     "--strict-json",
   ];
   yield buildCrossOsReleaseSmokeMemorySlotConfigArgs();

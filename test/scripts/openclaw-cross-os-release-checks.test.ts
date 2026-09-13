@@ -1247,7 +1247,7 @@ describe("scripts/openclaw-cross-os-release-checks", () => {
     ]
       .map((filePath) => readFileSync(filePath, "utf8"))
       .join("\n");
-    const providerOverride = "models.providers.${providerConfig.extensionId}";
+    const providerOverride = "models.providers.${providerMeta.extensionId}";
 
     expect(CROSS_OS_RELEASE_SMOKE_TOOLS_PROFILE).toBe("minimal");
     expect(source).toContain('"--thinking",\n    "off"');
