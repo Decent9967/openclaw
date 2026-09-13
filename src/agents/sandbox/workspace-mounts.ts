@@ -180,5 +180,8 @@ export function resolveWorkspaceMounts(params: {
   }
 
   const skills = params.readOnlyWorkspaceSkillMounts ?? resolveReadOnlyWorkspaceSkillMounts(params);
-  return [...mounts, ...skills.map((mount) => ({ ...mount, readOnly: true }))];
+  for (const { hostPath, containerPath } of skills) {
+    mounts.push({ hostPath, containerPath, readOnly: true });
+  }
+  return mounts;
 }
