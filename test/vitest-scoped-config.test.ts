@@ -604,7 +604,6 @@ describe("scoped vitest configs", () => {
       defaultExtensionLineConfig,
       defaultExtensionProviderOpenAiConfig,
       defaultExtensionSignalConfig,
-      defaultExtensionSlackConfig,
       defaultAutoReplyConfig,
       defaultAutoReplyCoreConfig,
       defaultAutoReplyTopLevelConfig,
@@ -760,6 +759,7 @@ describe("scoped vitest configs", () => {
   });
 
   it("serializes Slack extension files that share process globals", () => {
+    expectForkedNonIsolatedRunner(defaultExtensionSlackConfig);
     expect(requireTestConfig(defaultExtensionSlackConfig).fileParallelism).toBe(false);
   });
 

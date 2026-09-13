@@ -2737,26 +2737,46 @@ describe("short-term promotion", () => {
       acquiredAt: Date.now(),
     });
 
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const blocked = createDeferred<void>();
+    const lockKey = memoryCoreWorkspaceStateKey(workspaceDir);
+    configureMemoryCoreDreamingState(<T>(options: OpenKeyedStoreOptions) => {
+      const store = createPluginStateKeyedStoreForTests<T>("memory-core", options);
+      return {
+        ...store,
+        async registerIfAbsent(...args: Parameters<typeof store.registerIfAbsent>) {
+          const acquired = await store.registerIfAbsent(...args);
+          if (options.namespace === SHORT_TERM_LOCK_NAMESPACE && args[0] === lockKey && !acquired) {
+            blocked.resolve();
+          }
+          return acquired;
+        },
+      };
+    });
+    let settled = false;
+    const repairPromise = repairShortTermPromotionArtifacts({ workspaceDir }).then((result) => {
+      settled = true;
+      return result;
+    });
     try {
-      let settled = false;
-      const repairPromise = repairShortTermPromotionArtifacts({ workspaceDir }).then((result) => {
-        settled = true;
-        return result;
-      });
-
-      await vi.advanceTimersByTimeAsync(41);
+      // Real worker replies establish contention before the fixture releases its row.
+      await Promise.race([
+        blocked.promise,
+        repairPromise.then(() => {
+          throw new Error("Repair completed before observing the active lock");
+        }),
+      ]);
       expect(settled).toBe(false);
 
       await testing.deleteShortTermLock(workspaceDir);
-      await vi.advanceTimersByTimeAsync(40);
       const repair = await repairPromise;
 
       expect(repair.changed).toBe(true);
       expect(repair.rewroteStore).toBe(true);
       expect(repair.removedInvalidEntries).toBe(1);
     } finally {
-      vi.useRealTimers();
+      await testing.deleteShortTermLock(workspaceDir);
+      await Promise.allSettled([repairPromise]);
+      await configureMemoryCoreDreamingStateForTests();
     }
   });
 

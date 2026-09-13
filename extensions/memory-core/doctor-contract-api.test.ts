@@ -14,6 +14,7 @@ import {
   createPluginStateKeyedStoreForTests,
   getPluginStateCapacityForTests,
   importPluginStateEntriesForDoctorForTests,
+  openOpenClawStateDatabase,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type {
@@ -1124,6 +1125,8 @@ describe("memory-core doctor dreaming migration", () => {
     await context()
       .openPluginStateKeyedStore({ namespace: "memory-host.events", maxEntries: 10_000 })
       .clear();
+    // The age-preserving importer owns a native connection distinct from the async store.
+    openOpenClawStateDatabase({ env });
     const db = new DatabaseSync(path.join(rootDir, "state", "state", "openclaw.sqlite"));
     try {
       db.exec(`CREATE TRIGGER fail_host_import BEFORE INSERT ON plugin_state_entries

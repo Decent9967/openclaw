@@ -16,9 +16,13 @@ import type {
 } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
+  executeSqliteQuerySync,
+  getNodeSqliteKysely,
   getPluginStateCapacityForTests,
   importPluginStateEntriesForDoctorForTests,
+  openOpenClawStateDatabase,
   resetPluginStateStoreForTests,
+  type OpenClawStateKyselyDatabaseForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor-migrations";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -944,9 +948,26 @@ describe("matrix doctor contract state migrations", () => {
       defaultTtlMs: MATRIX_INBOUND_DEDUPE_TTL_MS,
       env,
     });
-    nowSpy.mockReturnValue(now + remainingTtlMs - 1);
+    const importedEntry = (await store.entries()).find((entry) => entry.key === storedEntry.key);
+    expect(importedEntry).toMatchObject({
+      createdAt: markerTs,
+      expiresAt: now + remainingTtlMs,
+      value: storedEntry.value,
+    });
+    nowSpy.mockRestore();
     await expect(store.lookup(storedEntry.key)).resolves.toEqual(storedEntry.value);
-    nowSpy.mockReturnValue(now + remainingTtlMs + 1);
+
+    // Preserve the imported deadline above, then seed expiry visible to the worker clock.
+    const { db } = openOpenClawStateDatabase({ env });
+    executeSqliteQuerySync(
+      db,
+      getNodeSqliteKysely<Pick<OpenClawStateKyselyDatabaseForTests, "plugin_state_entries">>(db)
+        .updateTable("plugin_state_entries")
+        .set({ expires_at: 1 })
+        .where("plugin_id", "=", "matrix")
+        .where("namespace", "=", resolveMatrixInboundDedupeStateNamespace())
+        .where("entry_key", "=", storedEntry.key),
+    );
     await expect(store.lookup(storedEntry.key)).resolves.toBeUndefined();
   });
 });

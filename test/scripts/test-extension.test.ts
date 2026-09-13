@@ -42,6 +42,7 @@ import {
 import { expectNoNodeFsScans } from "../../src/test-utils/fs-scan-assertions.js";
 import { waitForPidFile } from "../helpers/process-wait.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+import { databaseWorkerExtensionTestFiles } from "../vitest/vitest.extension-database-workers-paths.mjs";
 import { extensionCatchAllExcludedTestRoots } from "../vitest/vitest.extensions.config.ts";
 
 const scriptPath = path.join(process.cwd(), "scripts", "test-extension.mts");
@@ -183,25 +184,28 @@ describe("scripts/test-extension.mts", () => {
   it("splits the iMessage batch between persistence and channel owners without double counting", () => {
     const batch = resolveExtensionBatchPlan({ extensionIds: ["imessage"] });
     const files = listExtensionTestFilesForRoots(["extensions/imessage"]);
+    const workerFiles = databaseWorkerExtensionTestFiles.filter((file) =>
+      file.startsWith("extensions/imessage/"),
+    );
     expect(batch.extensionIds).toEqual(["imessage"]);
     expect(batch.testFileCount).toBe(files.length);
     expect(batch.planGroups).toEqual([
       expect.objectContaining({
         config: "test/vitest/vitest.extension-database-workers.config.ts",
-        roots: ["extensions/imessage/src/approval-reactions.persistence.test.ts"],
+        roots: workerFiles,
         extensionIds: ["imessage"],
-        testFileCount: 1,
+        testFileCount: workerFiles.length,
       }),
       expect.objectContaining({
         config: "test/vitest/vitest.extension-imessage.config.ts",
         roots: ["extensions/imessage"],
         extensionIds: ["imessage"],
-        testFileCount: files.length - 1,
+        testFileCount: files.length - workerFiles.length,
       }),
     ]);
-    expect(listExtensionTestFilesForRoots(batch.planGroups[0]!.roots)).toEqual([
-      "extensions/imessage/src/approval-reactions.persistence.test.ts",
-    ]);
+    expect(listExtensionTestFilesForRoots(batch.planGroups[0]!.roots)).toEqual(
+      workerFiles.toSorted(),
+    );
     const shards = createExtensionTestShards({ extensionIds: ["imessage"], shardCount: 2 });
     expect(shards).toHaveLength(1);
     expect(shards[0]?.planGroups).toEqual(batch.planGroups);
@@ -304,12 +308,16 @@ describe("scripts/test-extension.mts", () => {
     ).toEqual([[root]]);
   });
 
-  it("resolves memory extensions onto the memory vitest config", () => {
-    const plan = resolveExtensionTestPlan({ targetArg: "memory-core", cwd: process.cwd() });
+  it.each([
+    ["memory-core", "test/vitest/vitest.extension-database-workers.config.ts"],
+    ["memory-lancedb", "test/vitest/vitest.extension-memory.config.ts"],
+    ["memory-wiki", "test/vitest/vitest.extension-memory.config.ts"],
+  ])("resolves %s onto its memory storage owner", (extensionId, config) => {
+    const plan = resolveExtensionTestPlan({ targetArg: extensionId, cwd: process.cwd() });
 
-    expect(plan.extensionId).toBe("memory-core");
-    expect(plan.config).toBe("test/vitest/vitest.extension-memory.config.ts");
-    expect(plan.roots).toContain(bundledPluginRoot("memory-core"));
+    expect(plan.extensionId).toBe(extensionId);
+    expect(plan.config).toBe(config);
+    expect(plan.roots).toContain(bundledPluginRoot(extensionId));
     expect(plan.hasTests).toBe(true);
   });
 
@@ -462,6 +470,19 @@ describe("scripts/test-extension.mts", () => {
       "zalo",
       "zalouser",
     ]);
+    const allFiles = listExtensionTestFilesForRoots(batch.extensionIds.map(bundledPluginRoot));
+    const groupedFiles = batch.planGroups.flatMap((group) => {
+      const files = listExtensionTestFilesForRoots(group.roots).filter(
+        (file) =>
+          group.config === "test/vitest/vitest.extension-database-workers.config.ts" ||
+          !databaseWorkerExtensionTestFiles.includes(file),
+      );
+      expect(group.testFileCount).toBe(files.length);
+      return files;
+    });
+    expect(batch.testFileCount).toBe(allFiles.length);
+    expect(groupedFiles.toSorted()).toEqual(allFiles.toSorted());
+    expect(new Set(groupedFiles).size).toBe(allFiles.length);
     const stablePlanGroups = batch.planGroups.map(({ estimatedCost, testFileCount, ...group }) => {
       expectPositiveIntegerMetric(estimatedCost);
       expectPositiveIntegerMetric(testFileCount);
@@ -478,6 +499,34 @@ describe("scripts/test-extension.mts", () => {
         config: "test/vitest/vitest.extension-browser.config.ts",
         extensionIds: ["browser"],
         roots: [bundledPluginRoot("browser")],
+      },
+      {
+        config: "test/vitest/vitest.extension-database-workers.config.ts",
+        extensionIds: [
+          "acpx",
+          "matrix",
+          "mattermost",
+          "memory-core",
+          "msteams",
+          "telegram",
+          "voice-call",
+          "zalo",
+          "zalouser",
+        ],
+        roots: [
+          ...["matrix", "telegram", "mattermost", "voice-call", "zalo", "zalouser"].flatMap(
+            (extensionId) =>
+              databaseWorkerExtensionTestFiles.filter((file) =>
+                file.startsWith(`extensions/${extensionId}/`),
+              ),
+          ),
+          bundledPluginRoot("memory-core"),
+          ...["msteams", "acpx"].flatMap((extensionId) =>
+            databaseWorkerExtensionTestFiles.filter((file) =>
+              file.startsWith(`extensions/${extensionId}/`),
+            ),
+          ),
+        ],
       },
       {
         config: "test/vitest/vitest.extension-diffs.config.ts",
@@ -513,11 +562,6 @@ describe("scripts/test-extension.mts", () => {
         config: "test/vitest/vitest.extension-media.config.ts",
         extensionIds: ["vydra"],
         roots: [bundledPluginRoot("vydra")],
-      },
-      {
-        config: "test/vitest/vitest.extension-memory.config.ts",
-        extensionIds: ["memory-core"],
-        roots: [bundledPluginRoot("memory-core")],
       },
       {
         config: "test/vitest/vitest.extension-misc.config.ts",
