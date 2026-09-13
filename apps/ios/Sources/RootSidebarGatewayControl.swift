@@ -21,7 +21,10 @@ struct SidebarGatewayPresentation {
         self.state = state
     }
 
-    var showsPicker: Bool { self.entries.count > 1 }
+    var showsPicker: Bool {
+        self.entries.count > 1
+    }
+
     var focusedEntry: GatewaySettingsStore.GatewayRegistryEntry? {
         self.entries.first { GatewayStableIdentifier.matches($0.stableID, self.focusedID) }
     }
