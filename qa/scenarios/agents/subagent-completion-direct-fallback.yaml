@@ -202,6 +202,16 @@ flow:
           args:
             - ref: env
             - 180000
+        # Earlier public controls share this parent session. Scope tool receipts
+        # to the private ingress so their intentional message sends stay outside it.
+        - set: privateParentSessionKey
+          value:
+            expr: "(await readSettledTerminalTask(config.cases[config.cases.length - 1].name)).sessionKey"
+        - call: readSessionTranscriptSummary
+          saveAs: privateTranscriptBefore
+          args:
+            - ref: env
+            - ref: privateParentSessionKey
         - set: privateStartIndex
           value:
             expr: state.getSnapshot().messages.length
@@ -247,14 +257,28 @@ flow:
             expr: "privateSpawns.length === 2 && privateSpawns.every((request) => request.plannedToolArgs?.completionTarget === 'parent') && /QA-PARENT-PRIVATE-CHILD1-[A-F0-9]{32}/.test(privateSpawns[1].plannedToolArgs.task)"
             message:
               expr: "`private parent did not consume the first result to spawn exactly one second child: ${JSON.stringify(privateSpawns)}`"
+        # The debug prompt omits protected runtime carriers; inspect the actual
+        # latest user input consumed by the private continuation instead.
+        - set: privateCompletionCarrier
+          value:
+            expr: |-
+              (() => {
+                const rawInput = privateSpawns[1].body?.input;
+                const input = Array.isArray(rawInput) ? rawInput : typeof rawInput === 'string' ? [{ role: 'user', content: rawInput }] : [];
+                const content = input.findLast((item) => item.role === 'user')?.content;
+                const text = typeof content === 'string' ? content.trim() : Array.isArray(content) ? content.filter((part) => part.type === 'input_text').map((part) => part.text).join('\n').trim() : '';
+                const projection = /<conversation_context>\n([\s\S]*)\n<\/conversation_context>\n\nCurrent user request:\n([\s\S]*)$/.exec(text);
+                return projection?.[2] ?? text;
+              })()
         - assert:
-            expr: "privateSpawns[1].prompt.includes('Internal task completion event') && /MEDIA:[^\\n]*qa-private-result\\.png/.test(privateSpawns[1].prompt)"
-            message: The actual private completion carrier lost the child's media reference.
+            expr: "privateCompletionCarrier.includes('Internal task completion event') && /MEDIA:[^\\n]*qa-private-result\\.png/.test(privateCompletionCarrier)"
+            message:
+              expr: "`The actual private completion carrier lost the child's media reference: ${JSON.stringify({ carrier: privateCompletionCarrier.slice(0, 8192), childSessionKeys: privateTasks.map((task) => task.childSessionKey) })}`"
         - set: privateParentIds
           value:
             expr: 'privateSpawns.map((request) => /Runtime:[^\n]*sessionId=([^\s|]+)/.exec(request.allInputText)?.[1])'
         - assert:
-            expr: "privateParentIds[0] && privateParentIds[0] === privateParentIds[1] && privateTasks[0].sessionKey === privateTasks[1].sessionKey"
+            expr: "privateParentIds[0] && privateParentIds[0] === privateParentIds[1] && privateTasks[0].sessionKey === privateTasks[1].sessionKey && privateTasks[0].sessionKey === privateParentSessionKey"
             message: Private continuation changed its parent session.
         - call: readEffectiveTools
           saveAs: privateTools
@@ -269,11 +293,12 @@ flow:
           args:
             - ref: env
             - expr: privateTasks[0].sessionKey
+            - expr: "({ afterEventCursor: privateTranscriptBefore.eventCursor })"
         - set: privateSpawnReceipts
           value:
             expr: "privateSpawns.map((request) => privateTranscript.successfulToolCallEvents?.find((event) => event.name === (request.plannedWireToolName ?? request.plannedToolName) && event.toolCallId === (env.runtimeId !== 'codex' && request.plannedToolItemId ? `${request.plannedToolCallId}|${request.plannedToolItemId}` : request.plannedToolCallId)))"
         - assert:
-            expr: "privateSpawnReceipts.every(Boolean) && privateSpawnReceipts[1].timestamp >= privateTasks[0].endedAt && !(privateTranscript.successfulToolCallCounts.message > 0) && privateRequests.every((request) => request.plannedToolName !== 'message')"
+            expr: "privateTranscript.successfulToolCallCounts.sessions_spawn === 2 && privateSpawnReceipts.every(Boolean) && privateSpawnReceipts[1].timestamp >= privateTasks[0].endedAt && !(privateTranscript.successfulToolCallCounts.message > 0) && privateRequests.every((request) => request.plannedToolName !== 'message')"
             message:
               expr: "`private continuation lacks committed tool chronology or tried external messaging: tasks=${JSON.stringify(privateTasks)} transcript=${JSON.stringify(privateTranscript)}`"
         - set: privateOutbound
