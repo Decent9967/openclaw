@@ -82,8 +82,24 @@ describe("managed handoff boot identity", () => {
     await withMockedPlatform(platform, async () => {
       expect(store.bootIdentity()).toEqual({ platform, identity });
     });
-    expect(spawnSyncMock.mock.calls[0]?.[0]).toBe(
+    expect(spawnSyncMock).toHaveBeenCalledExactlyOnceWith(
       platform === "darwin" ? "/usr/sbin/sysctl" : "powershell.exe",
+      platform === "darwin"
+        ? ["-n", "kern.bootsessionuuid"]
+        : [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",
+          ],
+      {
+        env: serviceManagerEnv,
+        encoding: "utf8",
+        timeout: platform === "darwin" ? 1000 : 5000,
+        killSignal: "SIGKILL",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
     );
   });
 
