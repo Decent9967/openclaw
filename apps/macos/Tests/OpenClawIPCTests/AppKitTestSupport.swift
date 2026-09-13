@@ -1,7 +1,6 @@
 import AppKit
 import ApplicationServices
 import Testing
-import XCTest
 
 @MainActor
 enum AppKitTestSupport {
@@ -34,27 +33,67 @@ enum AppKitTestSupport {
         return elements
     }
 
+    static func waitForAccessibilityElement(
+        in window: NSWindow,
+        description: String,
+        matching find: ([AnyObject]) -> AnyObject?) async throws -> AnyObject
+    {
+        let deadline = ContinuousClock.now + .seconds(3)
+        var observedElements: [AnyObject] = []
+        repeat {
+            window.contentView?.layoutSubtreeIfNeeded()
+            let elements = try await self.accessibilityElements(in: window)
+            observedElements = elements
+            if let element = find(elements) {
+                return element
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        } while ContinuousClock.now < deadline
+        let toolbarItems = (window.toolbar?.items ?? []).map {
+            "\($0.itemIdentifier.rawValue): view=\(String(describing: $0.view))"
+        }.joined(separator: "\n")
+        let accessibility = observedElements.map {
+            let role = String(describing: $0.accessibilityRole?())
+            let title = String(describing: $0.accessibilityTitle?())
+            let label = String(describing: $0.accessibilityLabel?())
+            let value = String(describing: $0.accessibilityValue?())
+            let identifier = String(describing: $0.accessibilityIdentifier?())
+            return "role=\(role) title=\(title) label=\(label) value=\(value) identifier=\(identifier)"
+        }.joined(separator: "\n")
+        throw InteractionFailure(message: """
+        The rendered window must expose \(description)
+        appActive=\(NSApp.isActive) windowVisible=\(window.isVisible) windowKey=\(window.isKeyWindow)
+        Toolbar items:
+        \(toolbarItems)
+        Accessibility elements:
+        \(accessibility)
+        """)
+    }
+
     static func pressMenu(
         _ button: AnyObject,
-        file: StaticString = #filePath,
-        line: UInt = #line,
         inspect: @escaping (NSMenu) throws -> Void) throws
     {
         let tracking = AppKitTestMenuTracking(inspect: inspect)
         tracking.start()
         defer { tracking.stop() }
-        XCTAssertTrue(button.accessibilityPerformPress?() == true, file: file, line: line)
-        XCTAssertTrue(
-            tracking.observed,
-            "Pressing the rendered control must open its native menu",
-            file: file,
-            line: line)
-        XCTAssertFalse(
-            tracking.timedOut,
-            "The menu must finish before its tracking deadline",
-            file: file,
-            line: line)
+        guard button.accessibilityPerformPress?() == true else {
+            throw InteractionFailure(message: "The rendered control rejected the accessibility press")
+        }
+        guard tracking.observed else {
+            throw InteractionFailure(message: "Pressing the rendered control must open its native menu")
+        }
+        guard !tracking.timedOut else {
+            throw InteractionFailure(message: "The menu must finish before its tracking deadline")
+        }
         if let error = tracking.error { throw error }
+    }
+
+    private struct InteractionFailure: LocalizedError {
+        let message: String
+        var errorDescription: String? {
+            self.message
+        }
     }
 }
 

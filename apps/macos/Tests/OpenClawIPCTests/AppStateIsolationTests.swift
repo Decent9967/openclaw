@@ -1,10 +1,175 @@
+import AppKit
 import Foundation
+import OpenClawChatUI
 import Security
 import Testing
 @testable import OpenClaw
 
 @MainActor
 struct AppStateIsolationTests {
+    @Test
+    func `full chat preferences belong to the named profile`() async throws {
+        let profile = try #require(AppProfile.current.name)
+        try #require(profile.hasPrefix("test-"))
+        let favoritesKey = "openclaw.chat.modelFavorites"
+        let recentsKey = "openclaw.chat.modelRecents"
+        let reasoningKey = OpenClawChatWindowShell.assistantReasoningDefaultsKey
+        let toolActivityKey = OpenClawChatWindowShell.assistantToolActivityDefaultsKey
+        let autosaveName = "ProfileChatPreferences-\(UUID().uuidString)"
+        try await TestIsolation.withIsolatedState(defaults: [
+            favoritesKey: ["fixture/profile"],
+            recentsKey: [String](),
+            reasoningKey: true,
+            toolActivityKey: true,
+        ]) {
+            let defaultDefaults = UserDefaults.standard
+            let originalValues = [
+                favoritesKey, recentsKey, reasoningKey, toolActivityKey, "NSWindow Frame \(autosaveName)",
+            ].map {
+                ($0, defaultDefaults.object(forKey: $0))
+            }
+            defer {
+                for (key, value) in originalValues {
+                    if let value {
+                        defaultDefaults.set(value, forKey: key)
+                    } else {
+                        defaultDefaults.removeObject(forKey: key)
+                    }
+                }
+            }
+            defaultDefaults.set(["fixture/default"], forKey: favoritesKey)
+            defaultDefaults.set(["fixture/default"], forKey: recentsKey)
+            defaultDefaults.set(true, forKey: reasoningKey)
+            defaultDefaults.set(true, forKey: toolActivityKey)
+
+            _ = AppKitTestSupport.application
+            let transport = ProfileModelPickerTransport()
+            let controller = WebChatSwiftUIWindowController(
+                sessionKey: ProfileModelPickerTransport.sessionKey,
+                transport: transport,
+                windowTitle: "Profile chat preferences fixture",
+                windowAutosaveName: autosaveName)
+            defer { controller.close() }
+            controller.show()
+            let window = try #require(controller._testWindow)
+            for (title, key, otherTitle, otherKey, otherEnabled) in [
+                ("Show Reasoning", reasoningKey, "Show Tool Activity", toolActivityKey, true),
+                ("Show Tool Activity", toolActivityKey, "Show Reasoning", reasoningKey, false),
+            ] {
+                let threadButton = try await self.threadMenuButton(in: window)
+                var previousStates: [NSControl.StateValue] = []
+                try AppKitTestSupport.pressMenu(threadButton) { menu in
+                    let index = try #require(menu.items.firstIndex { $0.title == title })
+                    let other = try #require(menu.items.first { $0.title == otherTitle })
+                    try #require(menu.items[index].isEnabled)
+                    previousStates = [menu.items[index].state, other.state]
+                    menu.performActionForItem(at: index)
+                }
+                #expect(previousStates == [.on, otherEnabled ? .on : .off])
+                #expect(AppDefaults.standard.object(forKey: key) as? Bool == false)
+                #expect(AppDefaults.standard.object(forKey: otherKey) as? Bool == otherEnabled)
+                #expect(defaultDefaults.object(forKey: reasoningKey) as? Bool == true)
+                #expect(defaultDefaults.object(forKey: toolActivityKey) as? Bool == true)
+                let reopenedStates = try await self.threadPreferenceStates(in: window)
+                #expect(reopenedStates == [.off, key == reasoningKey ? .on : .off])
+            }
+
+            let button = try await self.loadedModelMenuButton(in: window, selection: "profile")
+            var initiallyPinned = false
+            try AppKitTestSupport.pressMenu(button) { menu in
+                initiallyPinned = menu.items.contains { $0.title == "Unpin model" }
+                let index = try #require(menu.items.firstIndex { $0.title == "fixture/fresh" })
+                try #require(menu.items[index].isEnabled)
+                menu.performActionForItem(at: index)
+            }
+            #expect(initiallyPinned)
+
+            // Wait for the accepted selection in either domain so the baseline reaches the ownership assertions.
+            let selectedButton = try await self.loadedModelMenuButton(in: window, selection: "fresh") {
+                [AppDefaults.standard, defaultDefaults].contains {
+                    $0.stringArray(forKey: recentsKey)?.first == "fixture/fresh"
+                }
+            }
+            #expect(await transport.selectedModels == ["fixture/fresh"])
+            #expect(AppDefaults.standard.stringArray(forKey: recentsKey) == ["fixture/fresh"])
+            #expect(defaultDefaults.stringArray(forKey: recentsKey) == ["fixture/default"])
+            try AppKitTestSupport.pressMenu(selectedButton) { menu in
+                let index = try #require(menu.items.firstIndex { $0.title == "Pin model" })
+                try #require(menu.items[index].isEnabled)
+                menu.performActionForItem(at: index)
+            }
+            #expect(AppDefaults.standard.stringArray(forKey: favoritesKey) == ["fixture/profile", "fixture/fresh"])
+            #expect(defaultDefaults.stringArray(forKey: favoritesKey) == ["fixture/default"])
+
+            controller.close()
+            let reopened = WebChatSwiftUIWindowController(
+                sessionKey: ProfileModelPickerTransport.sessionKey,
+                transport: transport,
+                windowTitle: "Profile chat preferences fixture",
+                windowAutosaveName: autosaveName)
+            defer { reopened.close() }
+            reopened.show()
+            let reopenedWindow = try #require(reopened._testWindow)
+            let reopenedButton = try await self.loadedModelMenuButton(in: reopenedWindow, selection: "fresh")
+            var restoredPin = false
+            try AppKitTestSupport.pressMenu(reopenedButton) { menu in
+                restoredPin = menu.items.contains { $0.title == "Unpin model" }
+            }
+            #expect(restoredPin)
+            #expect(AppDefaults.standard.stringArray(forKey: recentsKey) == ["fixture/fresh"])
+            #expect(defaultDefaults.stringArray(forKey: recentsKey) == ["fixture/default"])
+            let restoredThreadStates = try await self.threadPreferenceStates(in: reopenedWindow)
+            #expect(restoredThreadStates == [.off, .off])
+            #expect(defaultDefaults.object(forKey: reasoningKey) as? Bool == true)
+            #expect(defaultDefaults.object(forKey: toolActivityKey) as? Bool == true)
+        }
+    }
+
+    private func threadMenuButton(in window: NSWindow) async throws -> AnyObject {
+        try await AppKitTestSupport.waitForAccessibilityElement(in: window, description: "Thread menu") { elements in
+            elements.first {
+                let role = $0.accessibilityRole?()
+                return (role == .button || role == .popUpButton) &&
+                    [$0.accessibilityLabel?(), $0.accessibilityTitle?()].contains("Thread")
+            }
+        }
+    }
+
+    private func threadPreferenceStates(in window: NSWindow) async throws -> [NSControl.StateValue] {
+        let button = try await self.threadMenuButton(in: window)
+        var states: [NSControl.StateValue] = []
+        try AppKitTestSupport.pressMenu(button) { menu in
+            states = try ["Show Reasoning", "Show Tool Activity"].map { title in
+                let item = try #require(menu.items.first { $0.title == title })
+                return item.state
+            }
+        }
+        return states
+    }
+
+    private func loadedModelMenuButton(
+        in window: NSWindow,
+        selection: String,
+        when ready: () -> Bool = { true }) async throws -> AnyObject
+    {
+        try await AppKitTestSupport.waitForAccessibilityElement(
+            in: window,
+            description: "loaded Model menu for \(selection)")
+        { elements in
+            let loaded = elements.contains {
+                let value: Any? = $0.accessibilityValue?()
+                return [$0.accessibilityLabel?(), value as? String]
+                    .contains("What would you like to work on?")
+            }
+            guard loaded, ready() else { return nil }
+            return elements.first {
+                let value: Any? = $0.accessibilityValue?()
+                return $0.accessibilityIdentifier?() == "chat-composer-inline-model" &&
+                    $0.accessibilityLabel?() == "Model" && value as? String == selection
+            }
+        }
+    }
+
     @Test
     func `automatic recovery preserves a named profile port ownership failure`() async throws {
         try #require(AppProfile.current.isActive)
@@ -262,5 +427,59 @@ struct AppStateIsolationTests {
         } catch FixtureError.expected {}
         let removed = try #require(fixtureState)
         #expect(!fm.fileExists(atPath: removed.path))
+    }
+}
+
+private actor ProfileModelPickerTransport: OpenClawChatTransport {
+    static let sessionKey = "agent:fixture:main"
+    private var model = "fixture/profile"
+    private(set) var selectedModels: [String] = []
+
+    func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload {
+        try JSONDecoder().decode(OpenClawChatHistoryPayload.self, from: Data("""
+        {"sessionKey":"\(sessionKey)","messages":[],"thinkingLevel":"off"}
+        """.utf8))
+    }
+
+    func listSessions(
+        limit _: Int?,
+        search _: String?,
+        archived _: Bool) async throws -> OpenClawChatSessionsListResponse
+    {
+        try JSONDecoder().decode(OpenClawChatSessionsListResponse.self, from: Data("""
+        {"sessions":[{"key":"\(Self.sessionKey)","model":"\(self.model)"}]}
+        """.utf8))
+    }
+
+    func listModels(agentID _: String?) async throws -> [OpenClawChatModelChoice] {
+        ["profile", "default", "fresh"].map {
+            OpenClawChatModelChoice(modelID: $0, name: $0, provider: "fixture", available: true, contextWindow: nil)
+        }
+    }
+
+    func setSessionModel(sessionKey: String, model: String?) async throws {
+        guard sessionKey == Self.sessionKey, let model else {
+            throw NSError(domain: "ProfileModelPickerTransport", code: 1)
+        }
+        self.model = model
+        self.selectedModels.append(model)
+    }
+
+    func requestHealth(timeoutMs _: Int) async throws -> Bool {
+        true
+    }
+
+    nonisolated func events() -> AsyncStream<OpenClawChatTransportEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func sendMessage(
+        sessionKey _: String,
+        message _: String,
+        thinking _: String,
+        idempotencyKey _: String,
+        attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
+    {
+        throw NSError(domain: "ProfileModelPickerTransport", code: 2)
     }
 }
