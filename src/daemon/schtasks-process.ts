@@ -4,6 +4,7 @@ import { readGatewayOwnerLease } from "../infra/gateway-owner-lease.js";
 import { isGatewayArgv } from "../infra/gateway-process-argv.js";
 import { inspectPortUsage } from "../infra/ports-inspect.js";
 import type { PortListener } from "../infra/ports-types.js";
+import { tryAcquireGatewayLifecycleCleanupCoordinator } from "../infra/state-database-coordinator.js";
 import { parseTcpPort, parseTcpPortFromArgs } from "../infra/tcp-port.js";
 import {
   getWindowsPowerShellExePath,
@@ -11,6 +12,7 @@ import {
 } from "../infra/windows-install-roots.js";
 import { readWindowsProcessArgsSync } from "../infra/windows-port-pids.js";
 import { killProcessTree } from "../process/kill-tree.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { sleep } from "../utils.js";
 import { parseCmdScriptCommandLine } from "./cmd-argv.js";
 import { NODE_SERVICE_KIND } from "./constants.js";
@@ -179,16 +181,30 @@ async function resolveScheduledTaskGatewayOwnership(
     return null;
   }
   const ownerEnv = mergeGatewayServiceEnv(env, command);
-  const owner = readGatewayOwnerLease({ env: ownerEnv, port });
+  const owner = readGatewayOwnerLease({ env: ownerEnv });
   const pids = owner
-    ? owner.state === "live" && owner.mode === "supervised"
+    ? owner.port === port && owner.state === "live" && owner.mode === "supervised"
       ? [owner.pid]
       : []
     : await resolveLegacyScheduledTaskOwnedGatewayPids(env, context, command);
   return {
     pids,
+    acquireTerminationExclusion() {
+      if (owner) {
+        return null;
+      }
+      const exclusion = tryAcquireGatewayLifecycleCleanupCoordinator({
+        databasePath: resolveOpenClawStateSqlitePath(ownerEnv),
+      });
+      if (!exclusion) {
+        throw new Error(
+          "Gateway lifecycle ownership is held without a published identity; leave it running and retry after startup finishes.",
+        );
+      }
+      return exclusion;
+    },
     assertOwnerCurrent(pid: number) {
-      const current = readGatewayOwnerLease({ env: ownerEnv, port });
+      const current = readGatewayOwnerLease({ env: ownerEnv });
       if (!owner && !current) {
         return;
       }
@@ -197,6 +213,7 @@ async function resolveScheduledTaskGatewayOwnership(
         !current ||
         current.owner !== owner.owner ||
         current.pid !== pid ||
+        current.port !== port ||
         current.host !== owner.host ||
         current.startedAt !== owner.startedAt ||
         current.state !== "live" ||
@@ -208,7 +225,7 @@ async function resolveScheduledTaskGatewayOwnership(
   };
 }
 
-// Released Gateways without an owner lease still require exact installed-command proof.
+// Installed-command matching supplies candidates; physical exclusion authorizes legacy cleanup.
 async function resolveLegacyScheduledTaskOwnedGatewayPids(
   env: GatewayServiceEnv,
   context?: { port: number | null; probeHosts?: readonly string[] },
@@ -384,16 +401,21 @@ export async function terminateScheduledTaskGatewayListeners(
     return [];
   }
   const ownership = await resolveScheduledTaskGatewayOwnership(env, resolvedContext);
-  if (!ownership) {
+  if (!ownership || ownership.pids.length === 0) {
     return [];
   }
-  for (const pid of ownership.pids) {
-    await terminateGatewayProcessTree(pid, 300, () => {
-      assertCurrent?.();
-      ownership.assertOwnerCurrent(pid);
-    });
+  const exclusion = ownership.acquireTerminationExclusion();
+  try {
+    for (const pid of ownership.pids) {
+      await terminateGatewayProcessTree(pid, 300, () => {
+        assertCurrent?.();
+        ownership.assertOwnerCurrent(pid);
+      });
+    }
+    return ownership.pids;
+  } finally {
+    exclusion?.release();
   }
-  return ownership.pids;
 }
 
 export function probeProcessState(pid: number): "alive" | "missing" | "unknown" {

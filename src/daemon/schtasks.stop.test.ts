@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayOwnerLeaseIdentity } from "../infra/gateway-owner-lease.js";
+import { withStateDatabaseCoordinatorRuntimeDirectory } from "../infra/state-database-coordinator.js";
 import "./test-helpers/schtasks-base-mocks.js";
 import {
   gatewayServiceProbeHostsMock,
@@ -195,10 +196,12 @@ function setTaskStateProbeResult(state: number) {
 async function withPreparedGatewayTask(
   run: (context: { env: Record<string, string>; stdout: PassThrough }) => Promise<void>,
 ) {
-  await withWindowsEnv("openclaw-win-stop-", async ({ env }) => {
+  await withWindowsEnv("openclaw-win-stop-", async ({ tmpDir, env }) => {
     await writeGatewayScript(env, GATEWAY_PORT);
     const stdout = new PassThrough();
-    await run({ env, stdout });
+    await withStateDatabaseCoordinatorRuntimeDirectory(path.join(tmpDir, "coordinators"), () =>
+      run({ env, stdout }),
+    );
   });
 }
 

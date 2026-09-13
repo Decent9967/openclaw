@@ -280,6 +280,15 @@ function resolveGatewaySchemaFencePath(
   });
 }
 
+/** Legacy cleanup must exclude new admission without borrowing a process-local owner. */
+export function tryAcquireGatewayLifecycleCleanupCoordinator(
+  params: Pick<CoordinatorOptions, "databasePath" | "runtimeDirectory" | "uid">,
+): SqliteCoordinatorLease | null {
+  const pathname = resolveGatewaySchemaFencePath(params);
+  ensurePrivateSqliteCoordinatorDirectory(path.dirname(pathname), "gateway-lifecycle coordinator");
+  return tryAcquireExclusiveSqliteCoordinator(pathname, { busyTimeoutMs: 0 });
+}
+
 /** The broker owns this pin until backend close acknowledges or worker exit joins. */
 export function tryCreateGatewaySchemaFenceDelegate(params: GatewaySchemaFenceDelegateParams) {
   const coordinatorPath = resolveGatewaySchemaFencePath(params);
