@@ -499,11 +499,29 @@ export function runWithGatewayIndependentRootWorkContinuation<T>(
   run: () => Promise<T>,
   origin = "independent",
 ): Promise<T> {
+  return runWithGatewayRootWorkContinuation(run, origin, false);
+}
+
+/** Owns post-return resource cleanup while preserving the live parent's admission. */
+export function runWithGatewayDetachedWorkContinuation<T>(
+  run: () => Promise<T>,
+  origin = "independent",
+): Promise<T> {
+  return runWithGatewayRootWorkContinuation(run, origin, true);
+}
+
+function runWithGatewayRootWorkContinuation<T>(
+  run: () => Promise<T>,
+  origin: string,
+  detachedWork: boolean,
+): Promise<T> {
   const parent = GATEWAY_WORK_ADMISSION_STATE.currentRootWork.getStore();
   if (!parent || parent.released) {
-    return runWithGatewayIndependentRootWorkAdmission(run, origin);
+    return detachedWork
+      ? runWithGatewayDetachedWorkAdmission(run, origin)
+      : runWithGatewayIndependentRootWorkAdmission(run, origin);
   }
-  const admission = createGatewayRootWorkAdmission(origin);
+  const admission = createGatewayRootWorkAdmission(origin, detachedWork);
   return admission.run(run).finally(admission.release);
 }
 
