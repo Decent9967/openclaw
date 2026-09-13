@@ -54,6 +54,7 @@ export class SessionProgressCardController implements ReactiveController {
   }
 
   hostUpdate(): void {
+    // A queued Lit update can run after disconnect; do not reacquire the released store.
     if (this.connected) {
       this.synchronize();
     }
