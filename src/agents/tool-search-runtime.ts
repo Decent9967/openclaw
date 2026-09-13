@@ -39,6 +39,7 @@ import {
 } from "./tool-search-ranking.js";
 import {
   formatCatalogInputError,
+  formatCatalogOutputError,
   formatUnknownToolIdError,
   type ToolLookupErrorOptions,
 } from "./tool-search-recovery.js";
@@ -343,7 +344,7 @@ async function assertCatalogOutputMatchesSchema(
     return;
   }
   throw markToolContractFailure(
-    new Error(`Tool "${entry.id}" returned details that do not match its declared outputSchema.`),
+    new Error(formatCatalogOutputError(entry, validation.errors)),
     "output_contract",
   );
 }
