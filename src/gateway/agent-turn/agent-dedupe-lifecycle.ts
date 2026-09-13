@@ -30,6 +30,7 @@ export function createAgentDedupeLifecycle(params: {
   lifecycleGeneration: string;
   agentDedupeKeys: string[];
   suppressVisibleSessionEffects: boolean;
+  privateCompletion?: true;
   ownerConnId?: string;
   ownerDeviceId?: string;
   context: AgentTurnContext;
@@ -68,6 +69,11 @@ export function createAgentDedupeLifecycle(params: {
     setGatewayDedupeEntries({
       dedupe: params.context.dedupe,
       keys: params.agentDedupeKeys,
+      // Durable private input decides replay after the prior controller ends.
+      // Its new reservation must retire stale sticky terminal projections.
+      ...(params.privateCompletion && !params.context.chatAbortControllers.has(params.runId)
+        ? { startNewAttempt: true as const }
+        : {}),
       entry: {
         ts: acceptedAt,
         ok: true,

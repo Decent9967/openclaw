@@ -108,12 +108,14 @@ export function setGatewayDedupeEntries(params: {
   dedupe: GatewayRequestContext["dedupe"];
   keys: readonly string[];
   entry: Parameters<typeof setGatewayDedupeEntry>[0]["entry"];
+  startNewAttempt?: true;
 }): void {
   for (const key of params.keys) {
     setGatewayDedupeEntry({
       dedupe: params.dedupe,
       key,
       entry: params.entry,
+      startNewAttempt: params.startNewAttempt,
     });
   }
 }

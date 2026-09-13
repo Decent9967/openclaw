@@ -407,7 +407,7 @@ describe("private subagent completion processing receipts", () => {
       stopReason: "rpc",
     });
     expect(pending()).toEqual([]);
-    expect(await dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
+    expect(await dispatch()).toMatchObject({ status: "timeout", stopReason: "rpc" });
     await restart();
     expect(await dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
     expect(agentCommandMock).toHaveBeenCalledOnce();
