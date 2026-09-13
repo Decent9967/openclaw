@@ -123,7 +123,7 @@ export async function startAgentRunExecution(params: {
       const refsToDiscard = unpersistedOffloadedRefs;
       unpersistedOffloadedRefs = [];
       try {
-        const stopReason = prepared.activeRunAbort.entry.abortStopReason;
+        const stopReason = prepared.activeRunAbort.entry?.abortStopReason;
         const outcome = buildAgentRunTerminalOutcome({ status: "error", stopReason });
         const cancelled =
           prepared.activeRunAbort.controller.signal.aborted &&

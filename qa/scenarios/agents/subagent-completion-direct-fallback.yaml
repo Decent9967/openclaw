@@ -212,6 +212,17 @@ flow:
           args:
             - ref: env
             - ref: privateParentSessionKey
+        - set: privateTelegramWire
+          value:
+            expr: "transport.id === 'crabline' && transport.requiredPluginIds.includes('telegram')"
+        - set: readTelegramWire
+          value:
+            lambda:
+              async: true
+              expr: "privateTelegramWire ? (await fs.readFile(path.join(env.outputDir, 'artifacts/crabline/telegram-provider-server.jsonl'), 'utf8')).split('\\n').slice(0, -1).filter(Boolean).map((line) => JSON.parse(line)) : []"
+        - set: privateWireCursor
+          value:
+            expr: "(await readTelegramWire()).length"
         - set: privateStartIndex
           value:
             expr: state.getSnapshot().messages.length
@@ -239,6 +250,7 @@ flow:
               ref: privateConversationId
             senderName: QA Private Completion Operator
             text: "Subagent terminal reply QA check: private. Review the first child internally, use its result to start a second child, and remain silent after each completion."
+          saveAs: privateIngress
         - call: waitForCondition
           saveAs: privateTasks
           args:
@@ -301,21 +313,46 @@ flow:
             expr: "privateTranscript.successfulToolCallCounts.sessions_spawn === 2 && privateSpawnReceipts.every(Boolean) && privateSpawnReceipts[1].timestamp >= privateTasks[0].endedAt && !(privateTranscript.successfulToolCallCounts.message > 0) && privateRequests.every((request) => request.plannedToolName !== 'message')"
             message:
               expr: "`private continuation lacks committed tool chronology or tried external messaging: tasks=${JSON.stringify(privateTasks)} transcript=${JSON.stringify(privateTranscript)}`"
+        # Task settlement precedes channel flush. qa-channel replaces the full-text
+        # preview carrying tool metadata; wait for that deletion plus its final.
+        # Crabline's state contains sends only, so Telegram's raw recorder owns
+        # supplementary wire checks without a per-message retirement claim.
+        - call: waitForCondition
+          args:
+            - lambda:
+                expr: "(() => { const messages = state.getSnapshot().messages.slice(privateStartIndex).filter((message) => message.direction === 'outbound'); const acknowledgments = messages.filter((message) => !message.deleted && message.conversation.id === privateConversationId && String(message.text ?? '').trim() === config.parentAcknowledgment); return messages.length === 2 && acknowledgments.length === 1 && (privateTelegramWire || messages.filter((message) => message.deleted).length === 1) ? messages : undefined; })()"
+            - 60000
+            - 250
         - set: privateOutbound
           value:
             expr: "state.getSnapshot().messages.slice(privateStartIndex).filter((message) => message.direction === 'outbound')"
+        - set: privateAcknowledgments
+          value:
+            expr: "privateOutbound.filter((message) => !message.deleted && String(message.text ?? '').trim() === config.parentAcknowledgment)"
+        - set: isPrivateKickoffText
+          value:
+            lambda:
+              params:
+                - text
+              expr: "config.parentAcknowledgment.startsWith(String(text ?? '').trim()) || (privateTelegramWire && String(text ?? '').trim() === '<b>Working</b>')"
         - assert:
-            expr: "privateOutbound.length === 1 && !privateOutbound[0].deleted && privateOutbound[0].conversation.id === privateConversationId && String(privateOutbound[0].text ?? '').trim() === config.parentAcknowledgment && (privateOutbound[0].attachments?.length ?? 0) === 0"
+            expr: "privateIngress.id && privateOutbound.length === 2 && privateAcknowledgments.length === 1 && privateOutbound.every((message) => message.conversation.id === privateConversationId && (privateTelegramWire || message.replyToId === privateIngress.id) && (message.attachments?.length ?? 0) === 0 && isPrivateKickoffText(message.text))"
             message:
               expr: "`private completion emitted unexpected text or media on a channel: ${JSON.stringify(privateOutbound)}`"
-        # The event history retains payloads that were subsequently edited or deleted.
+        # The qa-channel history retains even subsequently edited/deleted payloads.
         - set: privateOutboundEvents
           value:
             expr: "state.getSnapshot().events.filter((event) => event.cursor > privateEventCursor && ['outbound-message', 'message-edited', 'message-deleted'].includes(event.kind) && event.message?.direction === 'outbound')"
         - assert:
-            expr: "privateOutboundEvents.filter((event) => event.kind === 'outbound-message').length === 1 && privateOutboundEvents.every((event) => event.message.conversation.id === privateConversationId && (event.message.attachments?.length ?? 0) === 0 && config.parentAcknowledgment.startsWith(String(event.message.text ?? '').trim()))"
+            expr: "privateOutboundEvents.filter((event) => event.kind === 'outbound-message').length === privateOutbound.length && privateOutboundEvents.every((event) => privateOutbound.some((message) => message.id === event.message.id) && event.message.conversation.id === privateConversationId && (privateTelegramWire || event.message.replyToId === privateIngress.id) && (event.message.attachments?.length ?? 0) === 0 && isPrivateKickoffText(event.message.text))"
             message:
               expr: "`private completion leaked a transient text or media payload: ${JSON.stringify(privateOutboundEvents)}`"
+        - set: privateWirePayloads
+          value:
+            expr: "(await readTelegramWire()).slice(privateWireCursor).filter((event) => event.type === 'api' && /\\/(?:send|editMessage|copyMessage|forwardMessage)[A-Za-z]*$/.test(event.path ?? '') && !event.path.endsWith('/sendChatAction'))"
+        - assert:
+            expr: "!privateTelegramWire || (privateWirePayloads.filter((event) => event.path.endsWith('/sendMessage')).length === 2 && privateWirePayloads.every((event) => event.accepted === true && /\\/(?:sendMessage|editMessageText)$/.test(event.path) && String(event.body?.chat_id) === String(transport.buildAgentDelivery({ target: `dm:${privateConversationId}` }).to) && isPrivateKickoffText(event.body?.text) && !/QA-PARENT-PRIVATE-CHILD1-|QA-PARENT-PRIVATE-CHILD2-DONE|qa-private-result\\.png|NO_REPLY/.test(JSON.stringify(event.body))))"
+            message: Telegram wire capture contained private text, media, or another message target.
         - forEach:
             items:
               ref: privateTasks
@@ -329,7 +366,7 @@ flow:
                   message: Private result reached the direct channel fallback.
         - set: appendPrivateVerdict
           value:
-            expr: "verdicts.push({ case: 'private', conversationId: privateConversationId, taskIds: privateTasks.map((task) => task.taskId), taskDeliveryStatus: 'delivered', privateSpawnReceiptCount: privateSpawnReceipts.length, messageToolDenied: !privateTools.has('message'), mediaReferenceConsumed: true, outboundAttachmentCount: privateOutboundEvents.reduce((count, event) => count + (event.message.attachments?.length ?? 0), 0), expectedTerminalSendCount: 0, actualTerminalSendCount: privateOutbound.length - 1, capturedTerminalPayloads: [], pass: true })"
+            expr: "verdicts.push({ case: 'private', conversationId: privateConversationId, taskIds: privateTasks.map((task) => task.taskId), taskDeliveryStatus: 'delivered', privateSpawnReceiptCount: privateSpawnReceipts.length, messageToolDenied: !privateTools.has('message'), mediaReferenceConsumed: true, outboundAttachmentCount: privateOutboundEvents.reduce((count, event) => count + (event.message.attachments?.length ?? 0), 0), expectedTerminalSendCount: 0, actualTerminalSendCount: privateAcknowledgments.length - 1, kickoffTransportSendCount: privateOutbound.length, previewRetirementVerified: !privateTelegramWire, capturedTerminalPayloads: [], pass: true })"
         # Every prior task is now terminal and delivery-settled, so restart from
         # the lifecycle boundary rather than waiting an arbitrary grace period.
         - set: preRestartOutbound
@@ -341,12 +378,17 @@ flow:
         - set: restartPatch
           value:
             expr: "({ tools: { deny: [] }, agents: { entries: { qa: { tools: { deny: [] } } } }, gateway: { controlUi: { allowedOrigins: [`http://127.0.0.1:${64000 + Math.floor(Math.random() * 999)}`] } } })"
-        - call: restartGatewayWithConfigPatch
+        - call: patchConfig
           args:
             - env:
                 ref: env
               patch:
                 ref: restartPatch
+              replacePaths:
+                - tools.deny
+                - agents.entries.qa.tools.deny
+                - gateway.controlUi.allowedOrigins
+              skipRestartDeferral: true
         - call: waitForGatewayHealthy
           args:
             - ref: env
@@ -423,6 +465,12 @@ flow:
             expr: "postRestartUnexpectedPayloads.length === 0"
             message:
               expr: "`Gateway restart synthesized output for already-settled handoffs: ${JSON.stringify(postRestartUnexpectedPayloads)}`"
+        - set: privatePostRestartWire
+          value:
+            expr: "(await readTelegramWire()).slice(privateWireCursor).filter((event) => event.type === 'api' && /\\/(?:send|editMessage|copyMessage|forwardMessage)[A-Za-z]*$/.test(event.path ?? '') && !event.path.endsWith('/sendChatAction'))"
+        - assert:
+            expr: "privatePostRestartWire.every((event) => /\\/(?:sendMessage|editMessageText)$/.test(event.path) && !/QA-PARENT-PRIVATE-CHILD1-|QA-PARENT-PRIVATE-CHILD2-DONE|qa-private-result\\.png|NO_REPLY/.test(JSON.stringify(event.body)))"
+            message: Telegram replayed private text or media after restart.
         - set: privatePostRestartEvents
           value:
             expr: "state.getSnapshot().events.filter((event) => event.cursor > privateEventCursor && ['outbound-message', 'message-edited', 'message-deleted'].includes(event.kind) && event.message?.direction === 'outbound')"

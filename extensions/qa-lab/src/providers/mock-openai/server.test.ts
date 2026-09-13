@@ -3840,6 +3840,40 @@ Update and merge these partial structured summaries.`,
     );
   });
 
+  it.each([false, true])(
+    "starts a new terminal worker after a historical private completion (projected=%s)",
+    async (projected) => {
+      const server = await startMockServer();
+      const completion = TEST_RUNTIME_CONTEXT_CARRIER.replace(
+        "runtime metadata",
+        "[Internal task completion event]\nResult: QA-PARENT-PRIVATE-CHILD2-DONE",
+      );
+      const prompt = "Subagent terminal reply QA check: restart.";
+      const payload = await expectNonStreamingResponsesJson(server, {
+        tools: [SESSIONS_SPAWN_TOOL],
+        input: [
+          makeUserInput("Subagent terminal reply QA check: private."),
+          ...(projected
+            ? [
+                makeUserInput(
+                  `<conversation_context>\n[user]\n${completion}\n\n[assistant]\nNO_REPLY\n</conversation_context>\n\nCurrent user request:\n${prompt}`,
+                ),
+              ]
+            : [
+                makeUserInput(completion),
+                { role: "assistant", content: [{ type: "output_text", text: "NO_REPLY" }] },
+                makeUserInput(prompt),
+              ]),
+        ],
+      });
+
+      expect(outputToolArgsFromItem(outputToolCall(payload, "sessions_spawn"))).toMatchObject({
+        task: "Subagent terminal reply QA worker: restart.",
+        label: "qa-terminal-restart",
+      });
+    },
+  );
+
   it("ignores a stale terminal-reply case in a later internal runtime carrier", async () => {
     const server = await startMockServer();
     const payload = await expectNonStreamingResponsesJson(server, {

@@ -9,8 +9,8 @@ import { promisify } from "node:util";
 import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
 import { writeGatewayRestartIntentSync } from "openclaw/plugin-sdk/qa-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { closeQaHttpServer } from "./bus-server.js";
 import { createQaGatewayChild, type QaGatewayChild } from "./gateway-child.js";
 import { QA_SUBAGENT_TERMINAL_MARKERS } from "./providers/mock-openai/mock-openai-contracts.js";
@@ -320,10 +320,13 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
       assertPrivateReplies(messages);
     }
 
-    function capturedReplies(since = 0) {
+    function capturedReplies(sessionKey: string, since = 0) {
+      // This admin observer also receives child-session transcript events. The
+      // private handoff controls publication to the parent, not child inspection.
       return events
         .slice(since)
         .filter(isRecord)
+        .filter((event) => event.sessionKey === sessionKey)
         .map((event) => event.message);
     }
 
@@ -375,6 +378,7 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
             .some(
               (event) =>
                 isRecord(event) &&
+                event.sessionKey === sessionKey &&
                 event.runId === kickoff.runId &&
                 event.state === "final" &&
                 JSON.stringify(replies([event.message])).includes("Worker started."),
@@ -382,7 +386,26 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
         30_000,
         100,
       );
-      assertPrivateReplies(capturedReplies());
+      for (const child of children) {
+        expect(child.childSessionKey).toBeTypeOf("string");
+        expect(child.runId).toBeTypeOf("string");
+        await waitForQaTransportCondition(
+          () =>
+            events
+              .slice(eventCursor)
+              .some(
+                (event) =>
+                  isRecord(event) &&
+                  event.sessionKey === child.childSessionKey &&
+                  event.runId === child.runId &&
+                  event.state === "final" &&
+                  privateMarker.test(JSON.stringify(replies([event.message]))),
+              ) || undefined,
+          30_000,
+          100,
+        );
+      }
+      assertPrivateReplies(capturedReplies(sessionKey, eventCursor));
       return { sessionKey, children, receipts };
     }
 
@@ -591,7 +614,13 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
       await ordinaryChild("agent:qa:package-downgraded-ordinary");
       await assertPrivateHistory(privateState.sessionKey);
       await assertPrivateHistory(pendingSession);
-      assertPrivateReplies(capturedReplies());
+      for (const sessionKey of [
+        privateState.sessionKey,
+        pendingSession,
+        "agent:qa:package-downgraded-ordinary",
+      ]) {
+        assertPrivateReplies(capturedReplies(sessionKey));
+      }
       expect(
         rows(
           agentDb,
@@ -642,7 +671,13 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
         ),
       ).toEqual(privateState.receipts);
       await assertPrivateHistory(privateState.sessionKey);
-      assertPrivateReplies(capturedReplies());
+      for (const sessionKey of [
+        privateState.sessionKey,
+        pendingSession,
+        "agent:qa:package-reopened-ordinary",
+      ]) {
+        assertPrivateReplies(capturedReplies(sessionKey));
+      }
       expect(
         rows(
           agentDb,
@@ -675,9 +710,18 @@ describe.skipIf(!candidateTarball)("private completion installed-package compati
       }
       await mock.stop();
       await heldProvider.stop();
+      const chatEvents = events
+        .filter(isRecord)
+        .slice(0, 100)
+        .map((event) => ({
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          state: event.state,
+          replies: JSON.stringify(replies([event.message])).slice(0, 2048),
+        }));
       await writeFile(
         path.join(evidenceDir, "verdict.json"),
-        `${JSON.stringify({ passed, sourceTree, candidateSha256, released: published, phases, proof: "actual installed packages, ordinary WebChat and native subagents, interrupted unconsumed private admission, read-only backing-store observations", limitation: "owned restart intent before package switching; abrupt crash-window fault injection is covered separately by Gateway/SQLite tests; downgrade can discard pending private handoffs; chat observers cover connected post-startup intervals, supplemented by durable history and provider request records; parent-session tool arguments remain visible to its operator" }, null, 2)}\n`,
+        `${JSON.stringify({ passed, sourceTree, candidateSha256, released: published, phases, chatEvents, proof: "actual installed packages, ordinary WebChat and native subagents, interrupted unconsumed private admission, read-only backing-store observations", limitation: "owned restart intent before package switching; abrupt crash-window fault injection is covered separately by Gateway/SQLite tests; downgrade can discard pending private handoffs; chat observers cover connected post-startup intervals, supplemented by durable history and provider request records; child-session events and parent-session tool arguments remain visible to their operator" }, null, 2)}\n`,
       );
     }
   }, 1_500_000);

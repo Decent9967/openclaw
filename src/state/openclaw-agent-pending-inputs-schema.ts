@@ -43,12 +43,13 @@ export function ensureSessionPendingInputsSchema(db: DatabaseSync): void {
   }
   const nested = db.isTransaction;
   runSqliteImmediateTransactionSync(db, () => {
+    // sqlite-allow-raw -- Canonical additive DDL only; application data uses Kysely.
     db.exec(
       OPENCLAW_AGENT_SCHEMA_SQL.slice(
         start,
         OPENCLAW_AGENT_SCHEMA_SQL.indexOf("-- Processing completion"),
       ),
-    ); // sqlite-allow-raw -- Canonical additive DDL only.
+    );
     ensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");
   });
   absentDatabases = new WeakSet();

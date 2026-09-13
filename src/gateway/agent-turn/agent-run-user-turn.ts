@@ -16,6 +16,7 @@ import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { deleteMediaBuffer } from "../../media/store.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
+import { recordSessionParticipantBestEffort } from "../../sessions/session-participant-recording.js";
 import {
   buildRunUserTurnIdempotencyKey,
   createUserTurnTranscriptRecorder,
@@ -31,6 +32,7 @@ import {
 import type { AgentRunRequest } from "../server-methods/agent-request-types.js";
 import { resolveSessionRuntimeCwd } from "../server-methods/agent-session-reset.js";
 import { gatewayClientSenderFields } from "../server-methods/gateway-client-identity.js";
+import { resolveGatewayInputParticipant } from "../session-input-participant.js";
 import { loadSessionEntry } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
 import {
@@ -38,7 +40,7 @@ import {
   shouldSuppressAgentPromptPersistence,
   type RestoredCronContinuation,
 } from "./agent-handler-helpers.js";
-import type { AgentTurnContext, AgentTurnPrincipal } from "./types.js";
+import type { AgentTurnContext, AgentTurnIo, AgentTurnPrincipal } from "./types.js";
 
 export type PreparedAgentRunUserTurn = {
   privateCompletion?: true;
@@ -53,6 +55,72 @@ export type PreparedAgentRunUserTurn = {
   suppressPromptPersistence: boolean;
   releaseProcessingAbortObserver?: () => void;
 };
+
+export function reconcileAgentRunUserTurnCompletion(
+  userTurn: PreparedAgentRunUserTurn,
+  accepted: { runId: string },
+  cleanupPreaccept: () => Promise<void>,
+  io: AgentTurnIo,
+): Promise<void> | undefined {
+  const completion = userTurn.recorder?.getProcessingCompletion?.();
+  // No-receipt admission must stay synchronous through ownership transfer;
+  // yielding here could accept a run cancelled after its final revalidation.
+  if (!completion) {
+    return undefined;
+  }
+  // Durable processing outlives Gateway dedupe. Release the fresh admission
+  // before acknowledging the receipt so the parent is never dispatched twice.
+  return cleanupPreaccept().then(() => {
+    io.emitAcceptance(
+      [
+        true,
+        {
+          ...accepted,
+          status: completion.status,
+          summary: completion.reason,
+          ...(completion.stopReason ? { stopReason: completion.stopReason } : {}),
+          ...(completion.reason === "completed" ? { inputProcessingCompleted: true } : {}),
+        },
+        undefined,
+      ],
+      { runId: accepted.runId },
+    );
+  });
+}
+
+export function recordAgentRunUserTurnParticipant(
+  params: {
+    client: AgentTurnPrincipal | null;
+    inputProvenance?: InputProvenance;
+    resolvedSessionKey?: string;
+    suppressVisibleSessionEffects: boolean;
+    promptedAt: number;
+    activeSessionAgentId: string;
+    context: Pick<AgentTurnContext, "logGateway">;
+  },
+  userTurn: PreparedAgentRunUserTurn,
+  storePath: string,
+): void {
+  const participant = resolveGatewayInputParticipant(params.client, params.inputProvenance);
+  if (
+    participant &&
+    params.resolvedSessionKey &&
+    !params.suppressVisibleSessionEffects &&
+    !userTurn.suppressPromptPersistence
+  ) {
+    recordSessionParticipantBestEffort({
+      identity: participant,
+      promptedAt: params.promptedAt,
+      agentId: params.activeSessionAgentId,
+      sessionKey: params.resolvedSessionKey,
+      storePath,
+      onError: (error) =>
+        params.context.logGateway.warn(
+          `agent participant persistence failed: ${formatForLog(error)}`,
+        ),
+    });
+  }
+}
 
 export async function prepareAgentRunUserTurn(params: {
   assertCurrent: () => void;

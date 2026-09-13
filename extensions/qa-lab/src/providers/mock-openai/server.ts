@@ -1381,13 +1381,13 @@ async function buildResponsesPayload(
   )
     ?.text.match(QA_SUBAGENT_TERMINAL_MATRIX_PROMPT_RE)?.[1]
     ?.toLowerCase();
+  // Persisted completion history must neither replay a spawn nor suppress a
+  // later kickoff. Only the latest carrier's current request owns this turn.
+  const latestUser = input.findLast((item) => item.role === "user");
+  const current = splitMockConversationContext(
+    latestUser ? extractAllRequestTexts([latestUser], {}) : "",
+  ).current;
   if (terminalCompletionCase === "private") {
-    // Inspect only the latest carrier. Historical completion markers must not
-    // repeat the second spawn on the next completion or a settled-batch wake.
-    const latestUser = input.findLast((item) => item.role === "user");
-    const current = splitMockConversationContext(
-      latestUser ? extractAllRequestTexts([latestUser], {}) : "",
-    ).current;
     const nonce = QA_SUBAGENT_PRIVATE_RESULT_RE.exec(current)?.[0];
     const requestedSecondChild = input.some(
       (item) =>
@@ -1425,7 +1425,7 @@ async function buildResponsesPayload(
       });
     }
   }
-  if (terminalCompletionCase && /Internal task completion event/i.test(allInputText)) {
+  if (terminalCompletionCase && /Internal task completion event/i.test(current)) {
     const visibleRepresentation =
       terminalCompletionCase === "silent"
         ? QA_SUBAGENT_TERMINAL_MARKERS.silent
