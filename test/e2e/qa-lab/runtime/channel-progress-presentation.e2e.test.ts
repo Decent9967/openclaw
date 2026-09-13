@@ -43,6 +43,34 @@ type WireWrite = {
 };
 type CrablineAdapter = Awaited<ReturnType<typeof startOpenClawCrablineAdapter>>;
 
+function createGroupOnlyGatewayConfig(adapter: CrablineAdapter): OpenClawConfig {
+  const config = adapter.createGatewayConfig() as OpenClawConfig;
+  return {
+    ...config,
+    channels: {
+      ...config.channels,
+      ...(config.channels?.discord
+        ? {
+            discord: {
+              ...config.channels.discord,
+              dm: { ...config.channels.discord.dm, enabled: false },
+              dmPolicy: "disabled" as const,
+            },
+          }
+        : {}),
+      ...(config.channels?.slack
+        ? {
+            slack: {
+              ...config.channels.slack,
+              allowFrom: [],
+              dmPolicy: "disabled" as const,
+            },
+          }
+        : {}),
+    },
+  };
+}
+
 function parseBody(text: string): Record<string, unknown> {
   try {
     return asRecord(JSON.parse(text));
@@ -685,7 +713,7 @@ describe("channel progress presentation through an isolated Gateway", () => {
       transportBaseUrl: api.baseUrl,
       transport: {
         requiredPluginIds: adapter.requiredPluginIds,
-        createGatewayConfig: () => adapter.createGatewayConfig() as OpenClawConfig,
+        createGatewayConfig: () => createGroupOnlyGatewayConfig(adapter),
       },
       runtimeEnvPatch: {
         ...adapter.createProviderReadinessEnv({}),
@@ -1078,7 +1106,7 @@ describe("channel progress presentation through an isolated Gateway", () => {
       transportBaseUrl: api.baseUrl,
       transport: {
         requiredPluginIds: adapter.requiredPluginIds,
-        createGatewayConfig: () => adapter.createGatewayConfig() as OpenClawConfig,
+        createGatewayConfig: () => createGroupOnlyGatewayConfig(adapter),
       },
       runtimeEnvPatch: {
         ...adapter.createProviderReadinessEnv({}),
@@ -1377,7 +1405,7 @@ describe("channel progress presentation through an isolated Gateway", () => {
         transportBaseUrl: api.baseUrl,
         transport: {
           requiredPluginIds: adapter.requiredPluginIds,
-          createGatewayConfig: () => adapter.createGatewayConfig() as OpenClawConfig,
+          createGatewayConfig: () => createGroupOnlyGatewayConfig(adapter),
         },
         runtimeEnvPatch: environment,
         mutateConfig: (config) => {
@@ -1545,7 +1573,11 @@ describe("channel progress presentation through an isolated Gateway", () => {
         expect(progressText).not.toMatch(toolRow);
       }
       if (failTool) {
-        expect(progressText).toContain("exit 1");
+        if (tools) {
+          expect(progressText).toContain("exit 1");
+        } else {
+          expect(progressText).not.toContain("exit 1");
+        }
       }
       const reactionAdds = writes.filter((write) =>
         channel === "discord"
