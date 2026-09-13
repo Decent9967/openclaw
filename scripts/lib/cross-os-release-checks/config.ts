@@ -214,6 +214,32 @@ export function buildReleaseProviderConfigOverride(providerMeta: ProviderConfig)
   };
 }
 
+// Yield between awaited commands so failed setup does not inspect later configuration.
+export function* buildReleaseModelConfigCommands(providerConfig: ProviderConfig) {
+  yield ["models", "set", providerConfig.model];
+  const providerConfigOverride = buildReleaseProviderConfigOverride(providerConfig);
+  if (providerConfigOverride) {
+    yield [
+      "config",
+      "set",
+      `models.providers.${providerConfig.extensionId}`,
+      JSON.stringify(providerConfigOverride),
+      "--strict-json",
+      "--merge",
+    ];
+  }
+  yield [
+    "config",
+    "set",
+    "plugins.allow",
+    JSON.stringify(buildCrossOsReleaseSmokePluginAllowlist(providerConfig)),
+    "--strict-json",
+  ];
+  yield buildCrossOsReleaseSmokeMemorySlotConfigArgs();
+  yield ["config", "set", "agents.defaults.skipBootstrap", "true", "--strict-json"];
+  yield ["config", "set", "tools.profile", CROSS_OS_RELEASE_SMOKE_TOOLS_PROFILE];
+}
+
 export const PACKAGE_DIST_INVENTORY_RELATIVE_PATH = "dist/postinstall-inventory.json";
 export const INSTALL_STAGE_DEBRIS_DIR_PATTERN = /^\.openclaw-install-stage(?:-[^/]+)?$/iu;
 export const OMITTED_QA_EXTENSION_PREFIXES = [
