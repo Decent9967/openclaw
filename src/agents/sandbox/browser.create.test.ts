@@ -1,6 +1,6 @@
 // Sandbox browser creation tests cover Docker args, bridge auth, noVNC access,
 // config hashing, and cached bridge invalidation.
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import path from "node:path";
@@ -16,6 +16,9 @@ import {
   SANDBOX_BROWSER_SECURITY_HASH_EPOCH,
   SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
 } from "./constants.js";
+import { DOCKER_SANDBOX_ENGINE, execContainer } from "./container-engine.js";
+import { resolveDockerSourceNamespace } from "./docker-mount-source.js";
+import { prepareSandboxMountPlan } from "./mount-plan.js";
 import { collectDockerFlagValues, findDockerArgsCall } from "./test-args.js";
 import type { SandboxConfig } from "./types.js";
 import { SANDBOX_MOUNT_FORMAT_VERSION } from "./workspace-mounts.js";
@@ -59,6 +62,19 @@ vi.mock("./docker.js", async () => {
     readDockerContainerLabel: dockerMocks.readDockerContainerLabel,
     readDockerPort: dockerMocks.readDockerPort,
   };
+});
+
+vi.mock("./docker-mount-source.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./docker-mount-source.js")>();
+  return {
+    parseInspectedSandboxMounts: actual.parseInspectedSandboxMounts,
+    translateSandboxMountSources: actual.translateSandboxMountSources,
+    resolveDockerSourceNamespace: vi.fn().mockResolvedValue(undefined),
+  };
+});
+vi.mock("./container-engine.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./container-engine.js")>();
+  return { ...actual, execContainer: vi.fn() };
 });
 
 vi.mock("./registry.js", () => ({
@@ -160,14 +176,13 @@ function buildConfig(noVncEnabled: boolean): SandboxConfig {
   };
 }
 
-function computeTestBrowserHash(params: {
+async function computeTestBrowserHash(params: {
   cfg: SandboxConfig;
   createArgsEpoch: string;
   workspaceDir?: string;
   agentWorkspaceDir?: string;
   dockerEnvPolicyEpoch?: string;
-  readOnlyWorkspaceSkillMounts?: string[];
-}): string {
+}): Promise<string> {
   const workspaceDir = params.workspaceDir ?? testWorkspaceDir;
   const agentWorkspaceDir = params.agentWorkspaceDir ?? workspaceDir;
   const browserDockerCfg = resolveSandboxBrowserDockerCreateConfig({
@@ -192,7 +207,16 @@ function computeTestBrowserHash(params: {
     agentWorkspaceDir,
     mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
     createArgsEpoch: params.createArgsEpoch,
-    readOnlyWorkspaceSkillMounts: params.readOnlyWorkspaceSkillMounts ?? [],
+    managedMounts: (
+      await prepareSandboxMountPlan({
+        engine: DOCKER_SANDBOX_ENGINE,
+        workspaceDir,
+        agentWorkspaceDir,
+        workdir: params.cfg.docker.workdir,
+        workspaceAccess: params.cfg.workspaceAccess,
+        binds: browserDockerCfg.binds,
+      })
+    ).binds,
   });
 }
 
@@ -253,6 +277,15 @@ describe("ensureSandboxBrowser create args", () => {
     testWorkspaceDir = tempDirs.make("openclaw-browser-workspace-");
     vi.restoreAllMocks();
     BROWSER_BRIDGES.clear();
+    vi.mocked(resolveDockerSourceNamespace).mockResolvedValue(undefined);
+    vi.mocked(execContainer).mockResolvedValue({
+      stdout: JSON.stringify({
+        Mounts: [{ Type: "bind", Source: testWorkspaceDir, Destination: "/workspace", RW: true }],
+        Tmpfs: null,
+      }),
+      stderr: "",
+      code: 0,
+    });
     dockerMocks.dockerContainerState.mockClear();
     dockerMocks.execDocker.mockClear();
     dockerMocks.readDockerContainerEnvVar.mockClear();
@@ -300,6 +333,67 @@ describe("ensureSandboxBrowser create args", () => {
       },
     });
     bridgeMocks.stopBrowserBridgeServer.mockResolvedValue(undefined);
+  });
+
+  it.each(["none", "ro", "rw"] as const)(
+    "uses daemon sources for browser mounts with %s access",
+    async (access) => {
+      const root = realpathSync(testWorkspaceDir);
+      for (const dir of ["private/skills", "agent/skills", "materialized/skills"]) {
+        mkdirSync(path.join(root, dir), { recursive: true });
+      }
+      vi.mocked(resolveDockerSourceNamespace).mockResolvedValue([
+        { type: "bind", source: "/host/browser-state", destination: root, writable: true },
+      ]);
+      const cfg = buildConfig(false);
+      cfg.workspaceAccess = access;
+      await ensureTestSandboxBrowser({
+        scopeKey: "session:test",
+        workspaceDir: path.join(root, access === "rw" ? "agent" : "private"),
+        agentWorkspaceDir: path.join(root, "agent"),
+        skillsWorkspaceDir: path.join(root, "materialized"),
+        cfg,
+      });
+      const binds = collectDockerFlagValues(requireDockerCreateArgs(), "-v");
+      expect(binds).toContain(
+        `/host/browser-state/${access === "rw" ? "agent" : "private"}:/workspace:${access === "ro" ? "ro,z" : "z"}`,
+      );
+      expect(binds.includes("/host/browser-state/agent:/agent:ro,z")).toBe(access === "ro");
+      if (access === "rw") {
+        expect(binds).toContain(
+          "/host/browser-state/materialized/skills:/workspace/.openclaw/sandbox-skills/skills:ro,z",
+        );
+      }
+    },
+  );
+
+  it("refuses a hot browser with stale sources without removing it or its bridge", async () => {
+    const containerName = "openclaw-sbx-browser-session-test-0661d10a";
+    const bridge = { containerName, bridge: { server: { listening: true } } };
+    BROWSER_BRIDGES.set("session:test", bridge);
+    dockerMocks.dockerContainerState.mockResolvedValue({ exists: true, running: true });
+    dockerMocks.readDockerContainerEnvVar.mockResolvedValue("existing-cdp-token");
+    dockerMocks.readDockerContainerLabel.mockResolvedValue("pre-fix-hash");
+    vi.mocked(execContainer).mockResolvedValue({
+      stdout: JSON.stringify({
+        Mounts: [{ Type: "bind", Source: "/old/source", Destination: "/workspace", RW: true }],
+        Tmpfs: null,
+      }),
+      stderr: "",
+      code: 0,
+    });
+    await expect(
+      ensureTestSandboxBrowser({
+        scopeKey: "session:test",
+        workspaceDir: testWorkspaceDir,
+        agentWorkspaceDir: testWorkspaceDir,
+        cfg: buildConfig(false),
+      }),
+    ).rejects.toThrow("openclaw sandbox recreate --browser --session session:test");
+    expect(findDockerArgsCall(dockerMocks.execDocker.mock.calls, "rm")).toBeUndefined();
+    expect(findDockerArgsCall(dockerMocks.execDocker.mock.calls, "create")).toBeUndefined();
+    expect(bridgeMocks.stopBrowserBridgeServer).not.toHaveBeenCalled();
+    expect(BROWSER_BRIDGES.get("session:test")).toBe(bridge);
   });
 
   it("rejects stale sandbox browser images without the relay auth contract", async () => {
@@ -447,7 +541,7 @@ describe("ensureSandboxBrowser create args", () => {
 
   it("recreates a cold browser container when the shared args epoch changes", async () => {
     const cfg = buildConfig(false);
-    const oldHash = computeTestBrowserHash({
+    const oldHash = await computeTestBrowserHash({
       cfg,
       createArgsEpoch: "pre-init",
     });
@@ -492,7 +586,7 @@ describe("ensureSandboxBrowser create args", () => {
 
   it("keeps a hot pre-init browser running and emits the recreate hint", async () => {
     const cfg = buildConfig(false);
-    const oldHash = computeTestBrowserHash({
+    const oldHash = await computeTestBrowserHash({
       cfg,
       createArgsEpoch: "pre-init",
     });
@@ -601,13 +695,10 @@ describe("ensureSandboxBrowser create args", () => {
         workspaceDir,
         agentWorkspaceDir,
         createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-        readOnlyWorkspaceSkillMounts: withSkillMount
-          ? [`${path.join(workspaceDir, "skills")}:/workspace/skills:ro`]
-          : [],
       };
-      const expectedHash = computeTestBrowserHash(hashInputs);
+      const expectedHash = await computeTestBrowserHash(hashInputs);
       expect(expectedHash).not.toBe(
-        computeTestBrowserHash({ ...hashInputs, dockerEnvPolicyEpoch: undefined }),
+        await computeTestBrowserHash({ ...hashInputs, dockerEnvPolicyEpoch: undefined }),
       );
 
       await ensureTestSandboxBrowser({

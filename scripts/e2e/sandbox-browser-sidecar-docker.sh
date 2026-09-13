@@ -20,8 +20,9 @@ SANDBOX_PREFIX="openclaw-e2e-sbx-${RUN_ID}-"
 BROWSER_PREFIX="openclaw-e2e-browser-${RUN_ID}-"
 NETWORK_NAME="openclaw-e2e-browser-${RUN_ID}"
 SCENARIO_ROOT="$(mktemp -d /tmp/openclaw-sandbox-browser-sidecar.XXXXXX)"
+GATEWAY_ROOT="/home/appuser/.openclaw-e2e"
 SESSION_KEY="agent:main:sandbox-browser-sidecar"
-WORKSPACE_HASH="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0, 32))' "$SCENARIO_ROOT/workspace")"
+WORKSPACE_HASH="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex").slice(0, 32))' "$GATEWAY_ROOT/workspace")"
 SCOPE_KEY="${SESSION_KEY}:workspace:${WORKSPACE_HASH}"
 BUILD_DIR="$(mktemp -d /tmp/openclaw-sandbox-browser-sidecar-build.XXXXXX)"
 DOCKER_SOCKET="${OPENCLAW_DOCKER_SOCKET:-/var/run/docker.sock}"
@@ -59,9 +60,11 @@ if [ ! -S "$DOCKER_SOCKET" ]; then
   exit 1
 fi
 
-# The inner sandbox containers bind host paths. Keep this path identical in the
-# package runner so the Docker daemon resolves the same task-owned directory.
-chmod 0777 "$SCENARIO_ROOT"
+# Deliberately distinct host/Gateway paths expose Docker-outside-Docker mistakes.
+# The nested workspace bind also proves longest-prefix mapping instead of relying
+# on the state directory's broader bind.
+mkdir -p "$SCENARIO_ROOT/agent workspace" "$SCENARIO_ROOT/nested data"
+chmod 0777 "$SCENARIO_ROOT" "$SCENARIO_ROOT/agent workspace" "$SCENARIO_ROOT/nested data"
 
 docker_e2e_build_or_reuse \
   "$FUNCTIONAL_IMAGE" \
@@ -99,11 +102,17 @@ docker_build_run sandbox-browser-sidecar-runner-build \
 SOCKET_GID="$(docker_socket_gid)"
 
 echo "Running package-backed sandbox browser sidecar Docker E2E..."
+for access in none ro rw; do
+SESSION_KEY="agent:main:sandbox-browser-sidecar:$access"
+SCOPE_KEY="${SESSION_KEY}:workspace:${WORKSPACE_HASH}"
 docker_e2e_run_logged_print_with_harness sandbox-browser-sidecar \
   --network host \
+  --hostname sandbox-gateway-e2e \
   --group-add "$SOCKET_GID" \
   -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-  -e "OPENCLAW_E2E_ROOT=$SCENARIO_ROOT" \
+  -e "OPENCLAW_E2E_ROOT=$GATEWAY_ROOT" \
+  -e "OPENCLAW_E2E_HOST_ROOT=$SCENARIO_ROOT" \
+  -e "OPENCLAW_E2E_WORKSPACE_ACCESS=$access" \
   -e "OPENCLAW_E2E_SESSION_KEY=$SESSION_KEY" \
   -e "OPENCLAW_E2E_SANDBOX_IMAGE=$SANDBOX_IMAGE" \
   -e "OPENCLAW_E2E_BROWSER_IMAGE=$BROWSER_IMAGE" \
@@ -111,11 +120,14 @@ docker_e2e_run_logged_print_with_harness sandbox-browser-sidecar \
   -e "OPENCLAW_E2E_BROWSER_PREFIX=$BROWSER_PREFIX" \
   -e "OPENCLAW_E2E_BROWSER_NETWORK=$NETWORK_NAME" \
   -v "$DOCKER_SOCKET:/var/run/docker.sock" \
-  -v "$SCENARIO_ROOT:$SCENARIO_ROOT" \
+  -v "$SCENARIO_ROOT:$GATEWAY_ROOT" \
+  -v "$SCENARIO_ROOT/agent workspace:$GATEWAY_ROOT/workspace" \
+  -v "$SCENARIO_ROOT/nested data:$GATEWAY_ROOT/workspace/data:ro" \
   -v "$SCENARIO_SOURCE:/tmp/openclaw-sandbox-browser-sidecar-scenario.mjs:ro" \
   "$RUNNER_IMAGE" \
   bash -lc \
   'cp /tmp/openclaw-sandbox-browser-sidecar-scenario.mjs /app/sandbox-browser-sidecar-scenario.mjs
    exec node /app/sandbox-browser-sidecar-scenario.mjs'
+done
 
 echo "Sandbox browser sidecar Docker E2E passed."

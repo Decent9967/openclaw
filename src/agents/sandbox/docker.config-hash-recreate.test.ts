@@ -10,6 +10,9 @@ import {
   SANDBOX_DOCKER_EXPLICIT_ENV_POLICY_EPOCH,
 } from "./config-hash.js";
 import { SANDBOX_DOCKER_CREATE_ARGS_EPOCH } from "./constants.js";
+import { DOCKER_SANDBOX_ENGINE } from "./container-engine.js";
+import { resolveDockerSourceNamespace } from "./docker-mount-source.js";
+import { prepareSandboxMountPlan } from "./mount-plan.js";
 import { collectDockerFlagValues } from "./test-args.js";
 import type { SandboxConfig } from "./types.js";
 import { SANDBOX_MOUNT_FORMAT_VERSION } from "./workspace-mounts.js";
@@ -27,6 +30,7 @@ const spawnState = vi.hoisted(() => ({
   inspectRunning: true,
   inspectError: "",
   labelHash: "",
+  mounts: "[]",
   podmanInfo: "true\tfalse\t\t5.0.0\n",
   podmanConnections: "[]\n",
   podmanMachines: "[]\n",
@@ -75,6 +79,27 @@ vi.mock("../../runtime.js", () => ({
   defaultRuntime: runtimeMocks,
 }));
 
+vi.mock("./docker-mount-source.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./docker-mount-source.js")>();
+  return {
+    parseInspectedSandboxMounts: actual.parseInspectedSandboxMounts,
+    translateSandboxMountSources: actual.translateSandboxMountSources,
+    resolveDockerSourceNamespace: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
+async function computeTestSandboxHash(input: Parameters<typeof computeSandboxConfigHash>[0]) {
+  const plan = await prepareSandboxMountPlan({
+    engine: DOCKER_SANDBOX_ENGINE,
+    workspaceDir: input.workspaceDir,
+    agentWorkspaceDir: input.agentWorkspaceDir,
+    workdir: input.docker.workdir,
+    workspaceAccess: input.workspaceAccess,
+    binds: input.docker.binds,
+  });
+  return computeSandboxConfigHash({ ...input, managedMounts: plan.binds });
+}
+
 async function spawnDockerProcess(commandAndArgs: string[]) {
   const [command = "", ...rawArgs] = commandAndArgs;
   const globalArgs: string[] = [];
@@ -122,6 +147,11 @@ async function spawnDockerProcess(commandAndArgs: string[]) {
     } else {
       stdout = `${spawnState.labelHash}\n`;
     }
+  } else if (
+    args[0] === "inspect" &&
+    args[2] === '{"Mounts":{{json .Mounts}},"Tmpfs":{{json .HostConfig.Tmpfs}}}'
+  ) {
+    stdout = JSON.stringify({ Mounts: JSON.parse(spawnState.mounts), Tmpfs: null });
   } else if (command === "podman" && args[0] === "info") {
     stdout = spawnState.podmanInfo;
   } else if (command === "podman" && args[0] === "system") {
@@ -269,6 +299,8 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     spawnState.inspectRunning = true;
     spawnState.inspectError = "";
     spawnState.labelHash = "";
+    spawnState.mounts = "[]";
+    vi.mocked(resolveDockerSourceNamespace).mockResolvedValue(undefined);
     spawnState.podmanInfo = "true\tfalse\t\t5.0.0\n";
     spawnState.podmanConnections = "[]\n";
     spawnState.podmanMachines = "[]\n";
@@ -278,6 +310,107 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     registryMocks.updateRegistry.mockClear();
     registryMocks.updateRegistry.mockResolvedValue(undefined);
     runtimeMocks.log.mockClear();
+  });
+
+  it.each(["none", "ro", "rw"] as const)(
+    "creates Docker mounts in the daemon namespace for %s access",
+    async (access) => {
+      const root = fs.realpathSync(tempDirs.make("openclaw-dood-"));
+      for (const dir of ["private/skills", "agent/skills", "materialized/skills"]) {
+        fs.mkdirSync(path.join(root, dir), { recursive: true });
+      }
+      vi.mocked(resolveDockerSourceNamespace).mockResolvedValue([
+        { type: "bind", source: "/host/state", destination: root, writable: true },
+      ]);
+      spawnState.containerExists = false;
+      registryMocks.readRegistryEntry.mockResolvedValue(null);
+      await ensureSandboxContainer({
+        scopeKey: "shared",
+        workspaceDir: path.join(root, access === "rw" ? "agent" : "private"),
+        agentWorkspaceDir: path.join(root, "agent"),
+        skillsWorkspaceDir: path.join(root, "materialized"),
+        cfg: createSandboxConfig([], [], access),
+      });
+      const binds = collectDockerFlagValues(
+        spawnState.calls.find((call) => call.args[0] === "create")?.args ?? [],
+        "-v",
+      );
+      expect(binds).toContain(
+        `/host/state/${access === "rw" ? "agent" : "private"}:/workspace:${access === "ro" ? "ro,z" : "z"}`,
+      );
+      expect(binds.includes("/host/state/agent:/agent:ro,z")).toBe(access === "ro");
+      if (access === "rw") {
+        expect(binds).toContain(
+          "/host/state/materialized/skills:/workspace/.openclaw/sandbox-skills/skills:ro,z",
+        );
+      }
+      expect(binds.some((bind) => bind.startsWith(root))).toBe(false);
+    },
+  );
+
+  it("preserves a hot container after a source change, then recreates it when stopped", async () => {
+    const workspaceDir = fs.realpathSync(tempDirs.make("openclaw-dood-"));
+    const cfg = createSandboxConfig([], []);
+    const params = { scopeKey: "shared", workspaceDir, agentWorkspaceDir: workspaceDir, cfg };
+    vi.mocked(resolveDockerSourceNamespace).mockResolvedValue([
+      { type: "bind", source: "/host/first", destination: workspaceDir, writable: true },
+    ]);
+    spawnState.containerExists = false;
+    registryMocks.readRegistryEntry.mockResolvedValue(null);
+    await ensureSandboxContainer(params);
+    const firstHash = spawnState.labelHash;
+    spawnState.mounts = JSON.stringify([
+      { Type: "bind", Source: "/host/first", Destination: "/workspace", RW: true },
+    ]);
+    registryMocks.readRegistryEntry.mockResolvedValue({
+      containerName: "oc-test-shared",
+      lastUsedAtMs: Date.now(),
+      configHash: firstHash,
+    });
+    vi.mocked(resolveDockerSourceNamespace).mockResolvedValue([
+      { type: "bind", source: "/host/second", destination: workspaceDir, writable: true },
+    ]);
+    spawnState.calls.length = 0;
+    await expect(ensureSandboxContainer(params)).rejects.toThrow(
+      "Recreate first: openclaw sandbox recreate --all",
+    );
+    expect(spawnState.calls.some((call) => ["rm", "create", "start"].includes(call.args[0]!))).toBe(
+      false,
+    );
+    expect(spawnState.labelHash).toBe(firstHash);
+    spawnState.inspectRunning = false;
+    await ensureSandboxContainer(params);
+    expect(spawnState.calls.some((call) => call.args[0] === "rm")).toBe(true);
+    expect(spawnState.labelHash).not.toBe(firstHash);
+    expect(
+      collectDockerFlagValues(
+        spawnState.calls.find((call) => call.args[0] === "create")?.args ?? [],
+        "-v",
+      ),
+    ).toContain("/host/second:/workspace:z");
+  });
+
+  it("refuses a pre-fix hot container with a removed skill overlay", async () => {
+    const workspaceDir = tempDirs.make("openclaw-dood-");
+    spawnState.mounts = JSON.stringify([
+      { Type: "bind", Source: workspaceDir, Destination: "/workspace", RW: true },
+      {
+        Type: "bind",
+        Source: `${workspaceDir}/skills`,
+        Destination: "/workspace/skills",
+        RW: false,
+      },
+    ]);
+    registryMocks.readRegistryEntry.mockResolvedValue(null);
+    await expect(
+      ensureSandboxContainer({
+        scopeKey: "shared",
+        workspaceDir,
+        agentWorkspaceDir: workspaceDir,
+        cfg: createSandboxConfig([], [], "none"),
+      }),
+    ).rejects.toThrow("Sandbox mounts changed");
+    expect(spawnState.calls.some((call) => call.args[0] === "rm")).toBe(false);
   });
 
   it("serializes concurrent provisioning for one container", async () => {
@@ -359,23 +492,21 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     const oldCfg = createSandboxConfig(["1.1.1.1", "8.8.8.8"], [`${workspaceDir}:/workspace:rw`]);
     const newCfg = createSandboxConfig(["8.8.8.8", "1.1.1.1"], [`${workspaceDir}:/workspace:rw`]);
 
-    const oldHash = computeSandboxConfigHash({
+    const oldHash = await computeTestSandboxHash({
       docker: oldCfg.docker,
       workspaceAccess: oldCfg.workspaceAccess,
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
-    const newHash = computeSandboxConfigHash({
+    const newHash = await computeTestSandboxHash({
       docker: newCfg.docker,
       workspaceAccess: newCfg.workspaceAccess,
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
     expect(newHash).not.toBe(oldHash);
 
@@ -426,14 +557,13 @@ describe("ensureSandboxContainer config-hash recreation", () => {
         workspaceDir,
         agentWorkspaceDir: workspaceDir,
         mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
-        readOnlyWorkspaceSkillMounts: [],
       };
-      const oldHash = computeSandboxConfigHash({
+      const oldHash = await computeTestSandboxHash({
         ...hashInput,
         createArgsEpoch: format === "create-args" ? "pre-init" : SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
         mountFormatVersion: format === "private-workspace-mount" ? 3 : SANDBOX_MOUNT_FORMAT_VERSION,
       });
-      const newHash = computeSandboxConfigHash({
+      const newHash = await computeTestSandboxHash({
         ...hashInput,
         createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
       });
@@ -461,8 +591,11 @@ describe("ensureSandboxContainer config-hash recreation", () => {
 
   it("keeps a hot pre-init container running and emits the recreate hint", async () => {
     const workspaceDir = tempDirs.make("openclaw-docker-mounts-");
+    spawnState.mounts = JSON.stringify([
+      { Type: "bind", Source: workspaceDir, Destination: "/workspace", RW: true },
+    ]);
     const cfg = createSandboxConfig([], [`${workspaceDir}:/workspace:rw`], "rw", {});
-    const oldHash = computeSandboxConfigHash({
+    const oldHash = await computeTestSandboxHash({
       docker: cfg.docker,
       dockerEnvPolicyEpoch: resolveDockerEnvPolicyEpoch(cfg.docker.env),
       workspaceAccess: cfg.workspaceAccess,
@@ -470,7 +603,6 @@ describe("ensureSandboxContainer config-hash recreation", () => {
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: "pre-init",
-      readOnlyWorkspaceSkillMounts: [],
     });
     spawnState.labelHash = oldHash;
     registryMocks.readRegistryEntry.mockResolvedValue({
@@ -532,16 +664,15 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     });
     cfg.docker.binds = [`${workspaceDir}:/workspace:rw`];
 
-    const oldHash = computeSandboxConfigHash({
+    const oldHash = await computeTestSandboxHash({
       docker: cfg.docker,
       workspaceAccess: cfg.workspaceAccess,
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
-    const newHash = computeSandboxConfigHash({
+    const newHash = await computeTestSandboxHash({
       docker: cfg.docker,
       dockerEnvPolicyEpoch: SANDBOX_DOCKER_EXPLICIT_ENV_POLICY_EPOCH,
       workspaceAccess: cfg.workspaceAccess,
@@ -549,7 +680,6 @@ describe("ensureSandboxContainer config-hash recreation", () => {
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
     expect(newHash).not.toBe(oldHash);
 
@@ -579,14 +709,13 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     const customUserFile = path.join(customRoot, "USER.md");
     const cfg = createSandboxConfig(["1.1.1.1"], [`${customUserFile}:/workspace/USER.md:ro`]);
     cfg.docker.dangerouslyAllowExternalBindSources = true;
-    const expectedHash = computeSandboxConfigHash({
+    const expectedHash = await computeTestSandboxHash({
       docker: cfg.docker,
       workspaceAccess: cfg.workspaceAccess,
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
 
     spawnState.inspectRunning = false;
@@ -662,6 +791,8 @@ describe("ensureSandboxContainer config-hash recreation", () => {
 
     spawnState.inspectRunning = false;
     spawnState.labelHash = "";
+    spawnState.mounts = "[]";
+    vi.mocked(resolveDockerSourceNamespace).mockResolvedValue(undefined);
     registryMocks.readRegistryEntry.mockResolvedValue(null);
 
     const createCall = await ensureSandboxCreateCallForTest({ cfg, workspaceDir });
@@ -1020,7 +1151,7 @@ describe("ensureSandboxContainer config-hash recreation", () => {
   it("invalidates a Podman container when the same tmpfs list becomes explicit", async () => {
     const workspaceDir = tempDirs.make("openclaw-docker-mounts-");
     const cfg = createSandboxConfig([], [`${workspaceDir}:/workspace:rw`]);
-    const genericHash = computeSandboxConfigHash({
+    const genericHash = await computeTestSandboxHash({
       docker: cfg.docker,
       dockerEnvPolicyEpoch: resolveDockerEnvPolicyEpoch(cfg.docker.env),
       workspaceAccess: cfg.workspaceAccess,
@@ -1028,7 +1159,6 @@ describe("ensureSandboxContainer config-hash recreation", () => {
       agentWorkspaceDir: workspaceDir,
       mountFormatVersion: SANDBOX_MOUNT_FORMAT_VERSION,
       createArgsEpoch: SANDBOX_DOCKER_CREATE_ARGS_EPOCH,
-      readOnlyWorkspaceSkillMounts: [],
     });
     const oldHash = `${genericHash}:podman-runtime-v8:keep-id:default`;
     cfg.dockerTmpfsSource = "configured";
