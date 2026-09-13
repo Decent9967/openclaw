@@ -129,7 +129,7 @@ struct AppStateIsolationTests {
         try await AppKitTestSupport.waitForAccessibilityElement(in: window, description: "Thread menu") { elements in
             elements.first {
                 let role = $0.accessibilityRole?()
-                return (role == .button || role == .popUpButton) &&
+                return (role == .button || role == .popUpButton || role == .menuButton) &&
                     [$0.accessibilityLabel?(), $0.accessibilityTitle?()].contains("Thread")
             }
         }

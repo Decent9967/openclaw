@@ -49,10 +49,10 @@ enum AppKitTestSupport {
             }
             try await Task.sleep(for: .milliseconds(20))
         } while ContinuousClock.now < deadline
-        let toolbarItems = (window.toolbar?.items ?? []).map {
+        let toolbarItems: String = (window.toolbar?.items ?? []).map {
             "\($0.itemIdentifier.rawValue): view=\(String(describing: $0.view))"
         }.joined(separator: "\n")
-        let accessibility = observedElements.map {
+        let accessibility: String = observedElements.map {
             let role = String(describing: $0.accessibilityRole?())
             let title = String(describing: $0.accessibilityTitle?())
             let label = String(describing: $0.accessibilityLabel?())
