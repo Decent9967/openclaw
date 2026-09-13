@@ -19,6 +19,7 @@ import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
 import { sha256HexPrefixCore } from "./crypto-digest.js";
 import { hasErrnoCode } from "./errno.js";
 import { createFileLockManager } from "./file-lock-manager.js";
+import { acquireGatewayOwnerLease, type GatewayOwnerLease } from "./gateway-owner-lease.js";
 import {
   isGatewayArgv,
   isOpenClawArgv,
@@ -114,6 +115,7 @@ export type GatewayLockOptions = {
   sleep?: (ms: number) => Promise<void>;
   lockDir?: string;
   role?: GatewayLockRole;
+  listenerMode?: "foreground" | "supervised";
   /** Override process command-line reader (testing seam). */
   readProcessCmdline?: (pid: number) => string[] | null;
   /** Override process start-identity reader (testing seam). */
@@ -452,8 +454,18 @@ export async function acquireGatewayLock(
       `gateway-lifecycle ownership acquired after ${((now() - startedAt) / 1000).toFixed(1)} s`,
     );
   }
+  let ownerLease: GatewayOwnerLease | undefined;
   let stateLock: Awaited<ReturnType<typeof acquireLockFile>>;
   try {
+    if (role === "gateway" && opts.listenerMode && opts.port) {
+      ownerLease = acquireGatewayOwnerLease({
+        env,
+        port: opts.port,
+        mode: opts.listenerMode,
+        owner: ownerId,
+      });
+      await ownerLease.ready;
+    }
     stateLock = await acquireLockFile({
       ...opts,
       configPath: paths.configPath,
@@ -464,6 +476,7 @@ export async function acquireGatewayLock(
       ownerId,
     });
   } catch (error) {
+    await ownerLease?.release();
     stateLifecycle.release();
     throw error;
   }
@@ -483,6 +496,8 @@ export async function acquireGatewayLock(
       stateLockPath: stateLock.lockPath,
       releaseInTree,
       release: async () => {
+        // Join the writer and remove its identity before relinquishing physical custody.
+        await ownerLease?.release();
         let releaseError: unknown;
         await releaseInTree().catch((error: unknown) => {
           releaseError = error;
@@ -542,6 +557,7 @@ export async function acquireGatewayLock(
       stateLockPath: stateLock.lockPath,
       releaseInTree,
       release: async () => {
+        await ownerLease?.release();
         let releaseError: Error | undefined;
         try {
           await releaseInTree();
@@ -566,6 +582,7 @@ export async function acquireGatewayLock(
     };
   } catch (error) {
     await stateLock.release().catch(() => undefined);
+    await ownerLease?.release();
     try {
       stateLifecycle.release();
     } catch {

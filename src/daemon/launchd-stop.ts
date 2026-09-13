@@ -67,7 +67,7 @@ async function assertGatewayPortReleasedAfterStop(
   }
   assertCurrent?.();
   assertGatewayServiceUpdateCurrent();
-  cleanStaleGatewayProcessesSync(port, { assertCurrent: assertGatewayServiceUpdateCurrent });
+  cleanStaleGatewayProcessesSync(port, { env, assertCurrent: assertGatewayServiceUpdateCurrent });
   const diagnostics = await inspectPortUsage(port, {
     probeHosts,
   }).catch(() => null);

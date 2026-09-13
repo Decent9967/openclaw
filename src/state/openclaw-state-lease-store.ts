@@ -4,6 +4,10 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
+import {
+  parseStateLeaseProcessOwner,
+  readStateLeaseProcessOwnerStatus,
+} from "../infra/state-lease-process-owner.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 
 export type OpenClawStateLeaseIdentity = { scope: string; key: string; owner: string };
@@ -14,6 +18,7 @@ export function acquireOpenClawStateLeaseInTransaction(
   db: DatabaseSync,
   identity: OpenClawStateLeaseIdentity,
   leaseMs: number,
+  payloadJson: string | null = null,
 ): number | undefined {
   // BEGIN IMMEDIATE may wait on SQLite. Sample only after admission so a
   // successful insert never commits an already-expired lease.
@@ -38,13 +43,43 @@ export function acquireOpenClawStateLeaseInTransaction(
         owner: identity.owner,
         expires_at: expiresAt,
         heartbeat_at: now,
-        payload_json: null,
+        payload_json: payloadJson,
         created_at: now,
         updated_at: now,
       })
       .onConflict((conflict) => conflict.columns(["scope", "lease_key"]).doNothing()),
   );
   return inserted.numAffectedRows === 1n ? expiresAt : undefined;
+}
+
+export function readOpenClawStateLease(
+  db: DatabaseSync,
+  identity: Pick<OpenClawStateLeaseIdentity, "scope" | "key">,
+) {
+  return executeSqliteQueryTakeFirstSync(
+    db,
+    getNodeSqliteKysely<LeaseDatabase>(db)
+      .selectFrom("state_leases")
+      .select(["owner", "expires_at as expiresAt", "payload_json as payloadJson"])
+      .where("scope", "=", identity.scope)
+      .where("lease_key", "=", identity.key),
+  );
+}
+
+/** Reclaim only a same-host owner whose process identity is provably gone. */
+export function reclaimDeadOpenClawStateLeaseInTransaction(
+  db: DatabaseSync,
+  identity: Pick<OpenClawStateLeaseIdentity, "scope" | "key">,
+) {
+  const existing = readOpenClawStateLease(db, identity);
+  if (
+    existing &&
+    readStateLeaseProcessOwnerStatus(parseStateLeaseProcessOwner(existing.payloadJson)) === "dead"
+  ) {
+    releaseOpenClawStateLeaseInTransaction(db, { ...identity, owner: existing.owner });
+    return undefined;
+  }
+  return existing;
 }
 
 export function readOpenClawStateLeaseExpiry(

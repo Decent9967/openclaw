@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { readGatewayOwnerLease } from "../infra/gateway-owner-lease.js";
 import { isGatewayArgv } from "../infra/gateway-process-argv.js";
 import { inspectPortUsage } from "../infra/ports-inspect.js";
 import type { PortListener } from "../infra/ports-types.js";
@@ -15,6 +16,7 @@ import { parseCmdScriptCommandLine } from "./cmd-argv.js";
 import { NODE_SERVICE_KIND } from "./constants.js";
 import { resolveGatewayServiceProbeHosts } from "./gateway-service-probe-hosts.js";
 import { readScheduledTaskCommand } from "./schtasks-layout.js";
+import { mergeGatewayServiceEnv } from "./service-env-merge.js";
 import { resolveServiceManagerEnv } from "./service-process-env.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
 import type { GatewayServiceCommandConfig, GatewayServiceEnv } from "./service-types.js";
@@ -155,6 +157,59 @@ export function resolveGatewayListenerPids(listeners: PortListener[]): number[] 
 }
 
 export async function resolveScheduledTaskOwnedGatewayPids(
+  env: GatewayServiceEnv,
+  context?: { port: number | null; probeHosts?: readonly string[] },
+  installedCommand?: GatewayServiceCommandConfig | null,
+): Promise<number[]> {
+  const ownership = await resolveScheduledTaskGatewayOwnership(env, context, installedCommand);
+  return ownership?.pids ?? [];
+}
+
+async function resolveScheduledTaskGatewayOwnership(
+  env: GatewayServiceEnv,
+  context?: { port: number | null; probeHosts?: readonly string[] },
+  installedCommand?: GatewayServiceCommandConfig | null,
+) {
+  const command =
+    installedCommand === undefined
+      ? await readScheduledTaskCommand(env).catch(() => null)
+      : installedCommand;
+  const port = context ? context.port : resolveScheduledTaskCommandPort(env, command);
+  if (!port) {
+    return null;
+  }
+  const ownerEnv = mergeGatewayServiceEnv(env, command);
+  const owner = readGatewayOwnerLease({ env: ownerEnv, port });
+  const pids = owner
+    ? owner.state === "live" && owner.mode === "supervised"
+      ? [owner.pid]
+      : []
+    : await resolveLegacyScheduledTaskOwnedGatewayPids(env, context, command);
+  return {
+    pids,
+    assertOwnerCurrent(pid: number) {
+      const current = readGatewayOwnerLease({ env: ownerEnv, port });
+      if (!owner && !current) {
+        return;
+      }
+      if (
+        !owner ||
+        !current ||
+        current.owner !== owner.owner ||
+        current.pid !== pid ||
+        current.host !== owner.host ||
+        current.startedAt !== owner.startedAt ||
+        current.state !== "live" ||
+        current.mode !== "supervised"
+      ) {
+        throw new Error(`Gateway owner changed before terminating process ${pid}`);
+      }
+    },
+  };
+}
+
+// Released Gateways without an owner lease still require exact installed-command proof.
+async function resolveLegacyScheduledTaskOwnedGatewayPids(
   env: GatewayServiceEnv,
   context?: { port: number | null; probeHosts?: readonly string[] },
   installedCommand?: GatewayServiceCommandConfig | null,
@@ -328,11 +383,17 @@ export async function terminateScheduledTaskGatewayListeners(
   if (!port) {
     return [];
   }
-  const pids = await resolveScheduledTaskOwnedGatewayPids(env, resolvedContext);
-  for (const pid of pids) {
-    await terminateGatewayProcessTree(pid, 300, assertCurrent);
+  const ownership = await resolveScheduledTaskGatewayOwnership(env, resolvedContext);
+  if (!ownership) {
+    return [];
   }
-  return pids;
+  for (const pid of ownership.pids) {
+    await terminateGatewayProcessTree(pid, 300, () => {
+      assertCurrent?.();
+      ownership.assertOwnerCurrent(pid);
+    });
+  }
+  return ownership.pids;
 }
 
 export function probeProcessState(pid: number): "alive" | "missing" | "unknown" {

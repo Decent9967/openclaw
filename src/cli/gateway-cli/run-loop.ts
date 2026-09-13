@@ -198,6 +198,7 @@ export async function runGatewayLoop(params: {
   );
   let lock = await acquireGatewayLock({
     port: params.lockPort,
+    listenerMode: supervisorMode ? "supervised" : "foreground",
     ...(params.lifecycleLockDeadlineMs !== undefined
       ? { lifecycleDeadlineMs: params.lifecycleLockDeadlineMs }
       : {}),
@@ -431,7 +432,10 @@ export async function runGatewayLoop(params: {
         continue;
       }
       try {
-        lock = await acquireGatewayLock({ port: params.lockPort });
+        lock = await acquireGatewayLock({
+          port: params.lockPort,
+          listenerMode: supervisorMode ? "supervised" : "foreground",
+        });
       } catch (err) {
         if (forcedExitStarted) {
           return;

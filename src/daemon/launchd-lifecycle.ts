@@ -272,6 +272,7 @@ export async function restartLaunchAgent({
     if (cleanupPort !== null) {
       assertGatewayServiceUpdateCurrent();
       cleanStaleGatewayProcessesSync(cleanupPort, {
+        env: serviceEnv,
         assertCurrent: assertGatewayServiceUpdateCurrent,
         // Resolve after lsof captures its listener snapshot. A KeepAlive respawn
         // during enumeration must be protected before candidate filtering/signals.

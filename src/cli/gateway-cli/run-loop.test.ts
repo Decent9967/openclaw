@@ -3304,9 +3304,18 @@ describe("runGatewayLoop", () => {
       await new Promise<void>((resolve) => {
         setImmediate(resolve);
       });
-      expect(acquireGatewayLock).toHaveBeenNthCalledWith(1, { port: 18789 });
-      expect(acquireGatewayLock).toHaveBeenNthCalledWith(2, { port: 18789 });
-      expect(acquireGatewayLock).toHaveBeenNthCalledWith(3, { port: 18789 });
+      expect(acquireGatewayLock).toHaveBeenNthCalledWith(1, {
+        port: 18789,
+        listenerMode: "foreground",
+      });
+      expect(acquireGatewayLock).toHaveBeenNthCalledWith(2, {
+        port: 18789,
+        listenerMode: "foreground",
+      });
+      expect(acquireGatewayLock).toHaveBeenNthCalledWith(3, {
+        port: 18789,
+        listenerMode: "foreground",
+      });
 
       sigterm();
       await expect(exited).resolves.toBe(0);
