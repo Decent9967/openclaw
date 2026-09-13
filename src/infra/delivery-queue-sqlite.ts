@@ -24,7 +24,7 @@ import {
   terminalizePendingDeliveryQueueEntryInDatabase,
   updateDeliveryQueueEntryInDatabase,
   upsertDeliveryQueueEntryInDatabase,
-  type QueueStatus,
+  type DeliveryQueueStoredStatus,
   type ReserveDeliveryQueueAttemptResult,
   type TerminalizePendingDeliveryQueueEntryParams,
   type TerminalizePendingDeliveryQueueEntryResult,
@@ -123,7 +123,7 @@ export function getDeliveryQueueEntryStatus(
   queueName: string,
   id: string,
   stateDir?: string,
-): QueueStatus | undefined {
+): DeliveryQueueStoredStatus | undefined {
   return getDeliveryQueueEntryOwners([queueName], id, stateDir).get(queueName)?.status;
 }
 
@@ -133,7 +133,7 @@ export function getDeliveryQueueEntryOwners(
   id: string,
   stateDir?: string,
   context?: DeliveryQueueStateContext,
-): Map<string, { status: QueueStatus; settlementPending?: true }> {
+): Map<string, { status: DeliveryQueueStoredStatus; settlementPending?: true }> {
   if (queueNames.length === 0) {
     return new Map();
   }

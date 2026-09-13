@@ -24,7 +24,7 @@ import {
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "./kysely-sync.js";
 import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
 
-export type QueueStatus = NonNullable<UpsertDeliveryQueueEntryParams["status"]>;
+export type DeliveryQueueStoredStatus = DeliveryQueueDatabase["delivery_queue_entries"]["status"];
 
 export type TerminalizePendingDeliveryQueueEntryResult =
   | { status: "terminalized"; retained: boolean }
@@ -34,11 +34,9 @@ export function deliveryQueueEntryNotFoundError(
   queueName: string,
   id: string,
 ): Error & { code: string } {
-  const err = new Error(`No pending ${queueName} delivery queue entry ${id}`) as Error & {
-    code: string;
-  };
-  err.code = "ENOENT";
-  return err;
+  return Object.assign(new Error(`No pending ${queueName} delivery queue entry ${id}`), {
+    code: "ENOENT",
+  });
 }
 
 export function upsertDeliveryQueueEntryInDatabase(
@@ -102,7 +100,7 @@ export function getDeliveryQueueEntryOwnersInDatabase(
   database: OpenClawStateDatabase,
   queueNames: readonly string[],
   id: string,
-): Map<string, { status: QueueStatus; settlementPending?: true }> {
+): Map<string, { status: DeliveryQueueStoredStatus; settlementPending?: true }> {
   if (queueNames.length === 0) {
     return new Map();
   }
@@ -154,8 +152,7 @@ export function getDeliveryQueueEntryOwnersInDatabase(
                 [
                   row.queue_name,
                   {
-                    // Preserve the status API and ownership of unknown stored statuses.
-                    status: row.status as QueueStatus,
+                    status: row.status,
                     ...(row.status === "failed" && row.recovery_state === "settlement_pending"
                       ? { settlementPending: true as const }
                       : {}),
