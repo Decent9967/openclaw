@@ -962,7 +962,7 @@ describe("WorkboardStore", () => {
   it("preserves legacy empty board appearance and persists explicit clears", async () => {
     const dir = tempDirs.make("openclaw-workboard-appearance-");
     const dbPath = path.join(dir, "workboard.sqlite");
-    const stores = createWorkboardSqliteStores({ dbPath });
+    const stores = createWorkboardSqliteStores({ dbPath, workerModuleUrl });
     try {
       const store = new WorkboardStore(stores.cards, sqliteTestAuxStores(stores));
       await store.upsertBoard({ id: "planning", name: "Planning", icon: "rocket", color: "blue" });
@@ -990,9 +990,9 @@ describe("WorkboardStore", () => {
       expect(withoutColor.icon).toBeUndefined();
       expect(withoutColor.color).toBeUndefined();
     } finally {
-      stores.close();
+      await stores.close();
     }
-    const reopened = createWorkboardSqliteStores({ dbPath });
+    const reopened = createWorkboardSqliteStores({ dbPath, workerModuleUrl });
     try {
       const store = new WorkboardStore(reopened.cards, sqliteTestAuxStores(reopened));
       const board = (await store.listBoards()).boards.find((item) => item.id === "planning");
@@ -1000,7 +1000,7 @@ describe("WorkboardStore", () => {
       expect(board?.icon).toBeUndefined();
       expect(board?.color).toBeUndefined();
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 
