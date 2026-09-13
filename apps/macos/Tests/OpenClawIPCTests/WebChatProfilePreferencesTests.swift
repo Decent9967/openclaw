@@ -64,6 +64,7 @@ final class WebChatProfilePreferencesTests: XCTestCase {
                     window.close()
                 }
                 window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
                 controller.view.layoutSubtreeIfNeeded()
 
                 let button = try await self.threadMenuButton(in: window)
@@ -97,9 +98,11 @@ final class WebChatProfilePreferencesTests: XCTestCase {
 
     private func threadMenuButton(in window: NSWindow) async throws -> AnyObject {
         let deadline = ContinuousClock.now + .seconds(3)
+        var observedElements: [AnyObject] = []
         repeat {
             window.contentView?.layoutSubtreeIfNeeded()
             let elements = try await AppKitTestSupport.accessibilityElements(in: window)
+            observedElements = elements
             if let button = elements.first(where: {
                 let role = $0.accessibilityRole?()
                 return (role == .button || role == .popUpButton) &&
@@ -109,7 +112,23 @@ final class WebChatProfilePreferencesTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(20))
         } while ContinuousClock.now < deadline
-        return try XCTUnwrap(nil as AnyObject?, "The rendered chat toolbar must expose its Thread menu")
+        let toolbarItems = (window.toolbar?.items ?? []).map {
+            "\($0.itemIdentifier.rawValue): view=\(String(describing: $0.view))"
+        }.joined(separator: "\n")
+        let accessibility = observedElements.map {
+            let role = String(describing: $0.accessibilityRole?())
+            let title = String(describing: $0.accessibilityTitle?())
+            let label = String(describing: $0.accessibilityLabel?())
+            return "role=\(role) title=\(title) label=\(label)"
+        }.joined(separator: "\n")
+        return try XCTUnwrap(nil as AnyObject?, """
+        The rendered chat toolbar must expose its Thread menu
+        appActive=\(NSApp.isActive) windowVisible=\(window.isVisible) windowKey=\(window.isKeyWindow)
+        Toolbar items:
+        \(toolbarItems)
+        Accessibility elements:
+        \(accessibility)
+        """)
     }
 }
 
