@@ -62,7 +62,7 @@ import {
   disposeOpenClawAgentDatabaseByPath,
   openOpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db.js";
+import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
@@ -90,7 +90,7 @@ type TranscriptUpdate = Parameters<
 >[0];
 
 const TEST_TOOL_AUTHORITY_FINGERPRINT = "test-tool-authority";
-const TEST_TOOL_AUTHORITY_ROUTE = { provider: "openai", model: "gpt-5.6-sol" } as const;
+const TEST_TOOL_AUTHORITY_ROUTE = { provider: "openai", model: "gpt-6-astra" } as const;
 
 const mockState = vi.hoisted(() => {
   const createTestState = () => ({
@@ -977,8 +977,8 @@ function createChatContext() {
         // exercise the unsupported-model fallback instead of Pi persistence.
         {
           provider: "openai",
-          id: "gpt-5.6-sol",
-          name: "GPT-5.6 Sol",
+          id: "gpt-6-astra",
+          name: "GPT-6 Astra",
           input: ["text", "image"],
         },
         {
@@ -5545,27 +5545,33 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     expect(extractFirstTextBlock(chatCall?.[1])).toBe("hello");
   });
 
-  it("chat.inject broadcasts and routes on the canonical session key", async () => {
-    await createTranscriptFixture("openclaw-chat-inject-canonical-key-");
-    mockState.sessionEntry = {
-      canonicalKey: "agent:main:canon",
-    };
-    const { context, respond, inject } = createChatRequestFixture();
+  it.each([false, true])(
+    "chat.inject broadcasts and routes on the canonical session key (explicit sole: %s)",
+    async (explicitOwnership) => {
+      await createTranscriptFixture("openclaw-chat-inject-canonical-key-");
+      if (explicitOwnership) {
+        mockState.config = { agents: { ownership: "explicit", entries: { main: {} } } };
+      }
+      mockState.sessionEntry = {
+        canonicalKey: "agent:main:canon",
+      };
+      const { context, respond, inject } = createChatRequestFixture();
 
-    await inject({
-      sessionKey: "legacy-key",
-      message: "hello",
-    });
+      await inject({
+        sessionKey: "legacy-key",
+        message: "hello",
+      });
 
-    const response = lastRespondCall(respond);
-    expect(response?.[0]).toBe(true);
-    expect(response?.[1]?.ok).toBe(true);
-    expect(lastBroadcastPayload(context)?.sessionKey).toBe("agent:main:canon");
-    const nodeSend = lastNodeSendCall(context);
-    expect(nodeSend?.[0]).toBe("agent:main:canon");
-    expect(nodeSend?.[1]).toBe("chat");
-    expect(nodeSend?.[2].sessionKey).toBe("agent:main:canon");
-  });
+      const response = lastRespondCall(respond);
+      expect(response?.[0]).toBe(true);
+      expect(response?.[1]?.ok).toBe(true);
+      expect(lastBroadcastPayload(context)?.sessionKey).toBe("agent:main:canon");
+      const nodeSend = lastNodeSendCall(context);
+      expect(nodeSend?.[0]).toBe("agent:main:canon");
+      expect(nodeSend?.[1]).toBe("chat");
+      expect(nodeSend?.[2].sessionKey).toBe("agent:main:canon");
+    },
+  );
 
   it("chat.inject advances the session registry marker after transcript append", async () => {
     await createTranscriptFixture("openclaw-chat-inject-registry-marker-");

@@ -55,7 +55,8 @@ const mocks = vi.hoisted(() => ({
   triageCommand: vi.fn<typeof import("./triage.js").triageCommand>(),
 }));
 
-vi.mock("../cli/update-cli/progress.js", () => ({
+vi.mock("../cli/update-cli/progress.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../cli/update-cli/progress.js")>()),
   createUpdateProgress: mocks.createUpdateProgress,
 }));
 
@@ -193,7 +194,7 @@ export function mockGitCheckout(root = "/repo/link") {
       // transport: bind a real child, consume its grant, and await its exit.
       const { runCommandWithTimeout } =
         await vi.importActual<typeof import("../process/exec.js")>("../process/exec.js");
-      const mode = argv.at(-1);
+      const mode = argv[argv.indexOf("--update-executor") + 1];
       const receiver = new URL("../cli/update-cli/update-command-executor.ts", import.meta.url)
         .href;
       const script =

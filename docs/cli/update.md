@@ -16,6 +16,16 @@ If you installed via **npm/pnpm/bun** (global install, no git metadata),
 updates go through the package-manager flow described in
 [Updating](/install/updating).
 
+Custom npm prefixes such as `~/.npm-global` are recognized from npm's configured
+prefix and the installed OpenClaw launcher. A prefix configured in `~/.npmrc`
+does not need a matching `NPM_CONFIG_PREFIX` environment variable. If no owner
+can be identified, the CLI includes the inspected package, prefix, and launcher
+paths and the package-manager probe results in its guidance.
+
+An older updater that stops before staging cannot use this repair. For a known
+npm installation, supply its configured prefix explicitly for that update:
+`NPM_CONFIG_PREFIX="$(npm prefix -g)" openclaw update`.
+
 An installation without a detected package-manager owner records a **skipped**
 update, exits successfully, and leaves the Gateway running. For Docker/container
 images, pull or build the new image and recreate the container with the same
@@ -49,6 +59,21 @@ openclaw --update
 
 `openclaw --update` rewrites to `openclaw update` (useful for shells and
 launcher scripts).
+
+Update admission recognizes orphan `task_delivery_state` rows whose parent tasks
+are missing as repairable. When it can acquire Doctor's ownership fences, it runs
+the same [preservation-first recovery](/reference/database-schemas/integrity-and-recovery#doctor-reports-orphan-task-delivery-rows)
+before creating update history. Recovery and its ledger entry commit together;
+the entry records the row count and recovery directory. A live Gateway owner,
+read-only store, or failed preservation prevents repair and reports
+`openclaw doctor --fix` as the next action. Other foreign-key violations and
+structural damage still refuse admission.
+`--dry-run` reports the repairable condition without recovering rows or creating
+an update ledger entry for that refused preview.
+
+The installed 2026.9.4 updater cannot use this recovery before updating itself.
+If it refuses with a database integrity error, install the corrective release
+manually and run `openclaw doctor --fix`.
 
 Failed update and repair attempts enter [recovery triage](/cli/update#recover-a-failed-update)
 after service recovery and cleanup finish.
@@ -128,12 +153,18 @@ deferred-install activation checks.
 
 ## Options
 
-Updater-managed `openclaw update finalize` runs repair Doctor without an automatic
-wall-clock deadline, including post-plugin repair. It waits for completion,
-failure, or manual cancellation. An explicit `--timeout <seconds>` still limits
-each finalization phase and its child commands. Post-plugin config validation and
-readiness checks keep their separate three-minute defaults; other finalization
-phase limits are unchanged.
+Updater-managed `openclaw update finalize` runs repair Doctor without a separate
+per-Doctor deadline, including post-plugin repair. The enclosing activation deadline
+still applies. An explicit `--timeout <seconds>` limits each finalization phase and
+its child commands. Admission and config phases scale with shared SQLite state.
+Post-plugin config validation and readiness checks use the measured shared and
+agent database sizes after Doctor finishes, including WAL files. Serial plugin
+operations retain individual deadlines within the enclosing activation budget. That
+budget uses the measured database sizes, observed candidate startup, plugin count,
+and the caller's step allowance. Migrated finalization receives the same allowance;
+it does not choose a separate default. Expiry reports `update-activation-timeout`
+and retains ownership until writers settle; it does not authorize rollback or restart.
+Use `openclaw update status` and Doctor for recovery guidance.
 
 | Flag                                             | Description                                                                                                                                                                                                                                                                                                                                   |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -195,6 +226,9 @@ govern later foreground and automatic updates, even after a one-off beta
 install. Use `--channel` to change that policy.
 
 For explicit package artifacts, configured plugin availability is checked against the privately staged package version before rehearsal or activation. `--dry-run` does not stage the artifact and reports that this check remains pending.
+
+Managed update handoffs preserve the selected artifact, including already-current
+repeats, so target checks use that artifact's database schema and runtime requirements.
 
 For source checkouts, `--dry-run` previews the update flow without fetching Git
 refs or checking working-tree changes. The real update checks for uncommitted

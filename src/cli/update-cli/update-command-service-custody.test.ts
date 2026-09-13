@@ -59,6 +59,9 @@ it.each([
     const fs=await import("node:fs");
     const mode=process.argv[process.argv.indexOf("--update-executor")+1];
     if(mode==="check") {
+      if(!process.argv.includes("--json")) {
+        process.stdout.write("Recorded warnings from the current update. ");
+      }
       const {DatabaseSync}=await import("node:sqlite");
       const {createManagedHandoffLeaseStore}=await import(${JSON.stringify(new URL("../../infra/update-managed-service-handoff-lease.ts", import.meta.url).href)});
       const databasePath=${JSON.stringify(path.join(control, "managed-update-handoffs.sqlite"))};
@@ -286,9 +289,13 @@ it.each([false, true])(
   },
 );
 
-it.skipIf(process.platform === "win32").each(["cooperative", "forced"] as const)(
-  "capability probe admits only successful settled cleanup: %s",
-  async (cleanup) => {
+it.skipIf(process.platform === "win32").each([
+  { cleanup: "cooperative", startupDelayMs: 0 },
+  { cleanup: "forced", startupDelayMs: 0 },
+  { cleanup: "cooperative", startupDelayMs: 31_000 },
+] as const)(
+  "capability probe admits only successful settled cleanup: $cleanup (startup=$startupDelayMs)",
+  async ({ cleanup, startupDelayMs }) => {
     const scratch = fsSync.realpathSync(dirs.make("native-probe-settlement-"));
     const root = fsSync.realpathSync(process.cwd());
     vi.spyOn(tempRoot, "resolvePreferredOpenClawTmpDir").mockReturnValue(scratch);
@@ -318,6 +325,7 @@ it.skipIf(process.platform === "win32").each(["cooperative", "forced"] as const)
       });
       await new Promise(resolve => child.once("message", resolve));
       fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ root: process.pid, child: child.pid }));
+      if (${startupDelayMs} > 0) await new Promise(resolve => setTimeout(resolve, ${startupDelayMs}));
       await runGatewayServiceUpdateCommand("check", "install", async () => {
         throw new Error("Capability probe must not enter the mutation callback");
       });
@@ -336,11 +344,13 @@ it.skipIf(process.platform === "win32").each(["cooperative", "forced"] as const)
     try {
       const supported = await withUpdateCommandExecutor(randomUUID(), async (executor) => {
         const fence = await executor.enter(root);
-        const capabilitySupported = await isUpdatedInstallGatewayExecutorSupported({
+        const probeParams = {
           root,
           env: process.env,
           executor: fence,
-        });
+          timeoutMs: 120_000,
+        };
+        const capabilitySupported = await isUpdatedInstallGatewayExecutorSupported(probeParams);
         fence.assertCurrent();
         const pids = JSON.parse(await fs.readFile(receipt, "utf8"));
         expect(isChildProcessTreeAlive({ pid: pids.root })).toBe(false);

@@ -51,6 +51,7 @@ function finalizeGatewayRestartSnapshot(
   snapshot: GatewayRestartSnapshot,
   expectedVersion: string | undefined,
   expectedBuildId: string | undefined,
+  requirePluginHealth: boolean,
 ): GatewayRestartSnapshot {
   if (expectedVersion) {
     snapshot.expectedVersion = expectedVersion;
@@ -77,7 +78,10 @@ function finalizeGatewayRestartSnapshot(
       }
     }
   }
-  if (snapshot.activatedPluginErrors?.length || snapshot.channelProbeErrors?.length) {
+  if (
+    (requirePluginHealth && snapshot.activatedPluginErrors?.length) ||
+    snapshot.channelProbeErrors?.length
+  ) {
     snapshot.healthy = false;
   }
   return snapshot;
@@ -89,13 +93,20 @@ export async function inspectGatewayRestart(params: {
   env?: NodeJS.ProcessEnv;
   expectedVersion?: string | null;
   expectedBuildId?: string | null;
+  requirePluginHealth?: boolean;
   includeUnknownListenersAsStale?: boolean;
   probeContext?: GatewayRestartProbeContext;
   configuredProbe?: ConfiguredGatewayLocalProbe;
   probeHosts?: readonly string[];
   signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<GatewayRestartSnapshot> {
   params.signal?.throwIfAborted();
+  const startedAtMs = performance.now();
+  const remainingTimeoutMs = () =>
+    params.timeoutMs === undefined
+      ? undefined
+      : Math.max(1, params.timeoutMs - (performance.now() - startedAtMs));
   const env = params.env ?? process.env;
   const probeHosts =
     params.probeHosts ??
@@ -105,10 +116,13 @@ export async function inspectGatewayRestart(params: {
     }));
   const expectedVersion = normalizeOptionalString(params.expectedVersion);
   const expectedBuildId = normalizeOptionalString(params.expectedBuildId);
-  const requiresGatewayProbe = Boolean(expectedVersion || expectedBuildId);
+  const requiresGatewayProbe = Boolean(
+    expectedVersion || expectedBuildId || params.requirePluginHealth === false,
+  );
   let reachability: GatewayReachability | null = null;
   let probeError: string | undefined;
   let activatedPluginErrors: PluginHealthErrorSummary[] = [];
+  let unavailablePlugins: GatewayReachability["unavailablePlugins"] = [];
   let channelProbeErrors: Array<{ id: string; error: string }> = [];
   const loadReachability = async () => {
     if (!reachability) {
@@ -117,17 +131,22 @@ export async function inspectGatewayRestart(params: {
         ...params.probeContext,
         ...(params.configuredProbe ? { configuredProbe: params.configuredProbe } : {}),
         env,
+        timeoutMs: remainingTimeoutMs(),
         ...(params.signal ? { signal: params.signal } : {}),
       });
       probeError = reachability.probeError;
       activatedPluginErrors = reachability.activatedPluginErrors;
+      unavailablePlugins = reachability.unavailablePlugins;
       channelProbeErrors = reachability.channelProbeErrors;
     }
     return reachability;
   };
   let runtime: GatewayServiceRuntime = { status: "unknown" };
   try {
-    runtime = await params.service.readRuntime(env);
+    runtime =
+      params.timeoutMs === undefined
+        ? await params.service.readRuntime(env)
+        : await params.service.readRuntime(env, { timeoutMs: remainingTimeoutMs() });
   } catch (err) {
     runtime = { status: "unknown", detail: String(err) };
   }
@@ -164,12 +183,16 @@ export async function inspectGatewayRestart(params: {
           ...(reachable.activatedPluginErrors.length > 0
             ? { activatedPluginErrors: reachable.activatedPluginErrors }
             : {}),
+          ...(reachable.unavailablePlugins.length > 0
+            ? { unavailablePlugins: reachable.unavailablePlugins }
+            : {}),
           ...(reachable.channelProbeErrors.length > 0
             ? { channelProbeErrors: reachable.channelProbeErrors }
             : {}),
         },
         expectedVersion,
         expectedBuildId,
+        params.requirePluginHealth !== false,
       );
     }
   }
@@ -248,10 +271,12 @@ export async function inspectGatewayRestart(params: {
       ...(gatewayBuildId !== undefined ? { gatewayBuildId } : {}),
       ...(probeError ? { probeError } : {}),
       ...(activatedPluginErrors.length ? { activatedPluginErrors } : {}),
+      ...(unavailablePlugins.length ? { unavailablePlugins } : {}),
       ...(channelProbeErrors.length ? { channelProbeErrors } : {}),
     },
     expectedVersion,
     expectedBuildId,
+    params.requirePluginHealth !== false,
   );
 }
 
@@ -304,6 +329,7 @@ export async function waitForGatewayHealthyRestart(params: {
   expectedBuildId?: string | null;
   includeUnknownListenersAsStale?: boolean;
   requireRunningService?: boolean;
+  requirePluginHealth?: boolean;
   supervisorKeepsAlive?: boolean;
   isStartupMigrationActive?: typeof hasActiveStartupMigrationLease;
   probeHosts?: readonly string[];
@@ -316,6 +342,10 @@ export async function waitForGatewayHealthyRestart(params: {
   const settleProbes = Math.max(1, params.settle?.probes ?? 1);
   const settleDurationMs = (settleProbes - 1) * delayMs;
   const standardDeadlineMs = params.timeoutMs ?? attempts * delayMs;
+  const probeTimeoutMs = () =>
+    params.timeoutMs === undefined
+      ? undefined
+      : Math.max(1, params.timeoutMs + settleDurationMs - (performance.now() - startedAtMs));
   const updateInProgress = (params.env ?? process.env).OPENCLAW_UPDATE_IN_PROGRESS === "1";
 
   const probeContext = await resolveGatewayRestartProbeContext(params.env).catch(() => ({
@@ -335,10 +365,12 @@ export async function waitForGatewayHealthyRestart(params: {
     env: params.env,
     expectedVersion: params.expectedVersion,
     expectedBuildId: params.expectedBuildId,
+    requirePluginHealth: params.requirePluginHealth,
     includeUnknownListenersAsStale: params.includeUnknownListenersAsStale,
     probeContext,
     configuredProbe,
     probeHosts,
+    timeoutMs: probeTimeoutMs(),
     ...(params.signal ? { signal: params.signal } : {}),
   });
 
@@ -399,7 +431,7 @@ export async function waitForGatewayHealthyRestart(params: {
       // Callers consume snapshot.healthy; a partial settle must not report recovery at timeout.
       snapshot.healthy = false;
     }
-    if (snapshot.activatedPluginErrors?.length) {
+    if (params.requirePluginHealth !== false && snapshot.activatedPluginErrors?.length) {
       return withWaitContext(snapshot, "plugin-errors", elapsedMs);
     }
     if (snapshot.channelProbeErrors?.length) {
@@ -474,10 +506,12 @@ export async function waitForGatewayHealthyRestart(params: {
       env: params.env,
       expectedVersion: params.expectedVersion,
       expectedBuildId: params.expectedBuildId,
+      requirePluginHealth: params.requirePluginHealth,
       includeUnknownListenersAsStale: params.includeUnknownListenersAsStale,
       probeContext,
       configuredProbe,
       probeHosts,
+      timeoutMs: probeTimeoutMs(),
       ...(params.signal ? { signal: params.signal } : {}),
     });
   }

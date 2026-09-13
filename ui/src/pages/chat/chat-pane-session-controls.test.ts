@@ -147,6 +147,42 @@ describe("chat account selection", () => {
     expect(view.onManage).toHaveBeenCalledOnce();
   });
 
+  it("retries a failed inventory when the section is reopened", async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("inventory offline"))
+      .mockResolvedValueOnce({
+        profileId: "owner",
+        links: [],
+        accounts: [
+          {
+            authProfileId: "openai:work",
+            provider: "openai",
+            label: "Work workspace",
+            authType: "oauth",
+            selected: true,
+          },
+        ],
+      } satisfies UsersListModelAccountsResult);
+    const view = mountAccountControl(request, {
+      kind: "personal",
+      label: "Personal workspace",
+      authProfileId: "openai:personal",
+      source: "user",
+    });
+    view.open();
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[role="alert"]')?.textContent).toContain(
+        "inventory offline",
+      ),
+    );
+    view.open();
+    view.open();
+    await vi.waitFor(() => expect(view.container.textContent).toContain("Work workspace"));
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it("discards a late inventory after leaving its initiating chat", async () => {
     const pending = createDeferred<UsersListModelAccountsResult>();
     const view = mountAccountControl(() => pending.promise, {
@@ -206,6 +242,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: "openai/gpt-5.6-luna",
       modelAccess: { allowed: true, requiredScope: "operator.write" },
       effortAccess: { allowed: true, requiredScope: "operator.write" },
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" },
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -277,6 +314,7 @@ describe("chat pane composer controls", () => {
         agentDefaultPermissionMode: "guarded",
         modelAccess: { allowed: true, requiredScope: "operator.write" },
         effortAccess: { allowed: true, requiredScope: "operator.write" },
+        contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
         permissionAccess: { allowed: true, requiredScope: "operator.write" },
         canSelectFull: true,
         onModelSetup,
@@ -418,6 +456,7 @@ describe("chat pane composer controls", () => {
       agentDefaultPermissionMode: "guarded",
       modelAccess: { allowed: true, requiredScope: "operator.write" },
       effortAccess: { allowed: true, requiredScope: "operator.write" },
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" },
       canSelectFull: false,
       onModelSetup: vi.fn(),
@@ -498,6 +537,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" },
       effortAccess: { allowed: true, requiredScope: "operator.write" },
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" },
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -605,6 +645,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" },
       effortAccess: { allowed: true, requiredScope: "operator.write" },
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" },
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -666,6 +707,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" } as const,
       effortAccess: { allowed: true, requiredScope: "operator.write" } as const,
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" } as const,
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -764,6 +806,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" },
       effortAccess: { allowed: true, requiredScope: "operator.write" },
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" },
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -834,6 +877,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" } as const,
       effortAccess: { allowed: true, requiredScope: "operator.write" } as const,
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" } as const,
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -897,6 +941,7 @@ describe("chat pane composer controls", () => {
       agentDefaultModel: undefined,
       modelAccess: { allowed: true, requiredScope: "operator.write" } as const,
       effortAccess: { allowed: true, requiredScope: "operator.write" } as const,
+      contextWindowAccess: { allowed: true, requiredScope: "operator.admin" } as const,
       permissionAccess: { allowed: true, requiredScope: "operator.write" } as const,
       canSelectFull: true,
       onModelSetup: vi.fn(),
@@ -914,83 +959,4 @@ describe("chat pane composer controls", () => {
     expect(trigger.disabled).toBe(false);
     expect(state.chatError).toContain("Failed to update permissions");
   });
-
-  it.each([
-    {
-      label: "warm",
-      cachedModels: [{ id: "cached-model", name: "Cached Model", provider: "openai" }],
-    },
-    { label: "cold", cachedModels: [] },
-  ])(
-    "revalidates the $label configured model catalog when the picker opens",
-    async ({ cachedModels }) => {
-      const container = document.createElement("div");
-      const catalog = createDeferred<{ models: typeof cachedModels }>();
-      const request = vi.fn(() => catalog.promise);
-      const state = {
-        chatRunId: null,
-        connected: true,
-        connectionEpoch: 1,
-        client: { request },
-        chatLoading: false,
-        chatModelCatalog: cachedModels,
-        chatModelCatalogError: null,
-        sessions: {
-          state: { modelOverrides: {} },
-          think: () => undefined,
-          patch: vi.fn(),
-          refresh: vi.fn().mockResolvedValue(undefined),
-        },
-        chatModelSwitchPromises: {},
-        sessionKey: "main",
-        chatModelsLoading: false,
-        chatSending: false,
-        sessionsResult: null,
-        chatStream: null,
-        requestUpdate: vi.fn(),
-      } as unknown as ChatPageHost;
-      const controlParams = {
-        state,
-        selectedSession: undefined,
-        agentDefaultModel: undefined,
-        modelAccess: { allowed: true, requiredScope: "operator.write" } as const,
-        effortAccess: { allowed: true, requiredScope: "operator.write" } as const,
-        permissionAccess: { allowed: true, requiredScope: "operator.write" } as const,
-        canSelectFull: true,
-        onModelSetup: vi.fn(),
-      };
-      render(renderChatPaneComposerControls(controlParams).composerControls, container);
-
-      const picker = container.querySelector<HTMLDetailsElement>(".chat-controls__model-picker");
-      picker!.open = true;
-      picker!.dispatchEvent(new Event("toggle"));
-
-      expect(state.chatModelPickerOpenSessionKey).toBe("main");
-      expect(request).toHaveBeenCalledOnce();
-      expect(request).toHaveBeenCalledWith(
-        "models.list",
-        {
-          view: "configured",
-          agentId: "main",
-          sessionKey: "main",
-        },
-        { signal: expect.any(AbortSignal) },
-      );
-      expect(state.chatModelsLoading).toBe(cachedModels.length === 0);
-      render(renderChatPaneComposerControls(controlParams).composerControls, container);
-      if (cachedModels.length > 0) {
-        expect(container.querySelector("[data-chat-model-catalog-state]")).toBeNull();
-        expect(
-          container.querySelector<HTMLButtonElement>("[data-chat-model-option]")?.disabled,
-        ).toBe(false);
-        expect(container.textContent).toContain("Cached Model");
-      } else {
-        expect(container.querySelector('[data-chat-model-catalog-state="loading"]')).not.toBeNull();
-        expect(container.textContent).toContain("Loading models…");
-      }
-      const freshModels = [{ id: "fresh-model", name: "Fresh Model", provider: "openai" }];
-      catalog.resolve({ models: freshModels });
-      await vi.waitFor(() => expect(state.chatModelCatalog).toEqual(freshModels));
-    },
-  );
 });

@@ -135,6 +135,7 @@ export function loadOpenClawPluginsCore(
     const loadPluginModule = createPluginModuleLoader({
       devSourceRoot: context.devSourceRoot,
       pluginSdkResolution: options.pluginSdkResolution,
+      expectedSourceDigests: options.expectedSourceDigests,
       ...overrides?.moduleLoader,
     });
     const activeRuntime =
@@ -186,7 +187,7 @@ export function loadOpenClawPluginsCore(
         coreGatewayMethodNames: options.coreGatewayMethodNames,
       }),
       ...(options.hostServices !== undefined && { hostServices: options.hostServices }),
-      activateGlobalSideEffects: context.shouldActivate,
+      activateGlobalSideEffects: context.runtimeSideEffects,
     });
     const builder = registryBuilder;
     const { registry } = builder;
@@ -201,6 +202,10 @@ export function loadOpenClawPluginsCore(
         emitWarning: context.shouldActivate,
         warningCacheKey: context.cacheKey,
       });
+    const loaderCacheIdentity = Object.freeze({
+      requestKey: context.cacheKey,
+      resolvedKey: context.resolveManifestCacheKey(manifestRegistry),
+    });
     // Raw and prepared loads share one owner; absent workspace means shared-root scope.
     setPluginRuntimeLoadContext(
       registry,
@@ -217,10 +222,7 @@ export function loadOpenClawPluginsCore(
         preferBuiltPluginArtifacts: options.preferBuiltPluginArtifacts,
       },
       context.registrationConfigKey,
-      Object.freeze({
-        requestKey: context.cacheKey,
-        resolvedKey: context.resolveManifestCacheKey(manifestRegistry),
-      }),
+      loaderCacheIdentity,
     );
     const replacedIds = new Set(options.replacePluginIds ?? []);
     const memorySlot = context.normalized.slots.memory;
@@ -274,7 +276,7 @@ export function loadOpenClawPluginsCore(
         hasKind(manifest.kind, "memory") ? memorySlot : undefined,
         manifest.id === dreamingSidecar?.engineId ? dreamingSidecar : undefined,
         context.artifactPreference,
-        context.shouldActivate,
+        context.runtimeSideEffects,
         context.channelPluginLoadIntent,
         context.includeSetupOnlyChannelPlugins,
         context.forceSetupOnlyChannelPlugins,
@@ -432,14 +434,14 @@ export function loadOpenClawPluginsCore(
         ),
       );
     }
-    maybeThrowOnPluginLoadError(registry, options.throwOnLoadError);
+    maybeThrowOnPluginLoadError(registry, options.throwOnLoadError, retained);
     if (context.shouldActivate && options.mode !== "validate") {
       const failedPlugins = registry.plugins.filter((plugin) => plugin.failedAt != null);
       if (failedPlugins.length > 0) {
         logger.warn(
           `[plugins] ${failedPlugins.length} plugin(s) failed to initialize (${formatPluginFailureSummary(
             failedPlugins,
-          )}). Run 'openclaw plugins inspect <id> --runtime --json' for runtime diagnostics and 'openclaw plugins list' for registry state. Restart the Gateway after fixing plugin code or load paths.`,
+          )}). Run 'openclaw plugins inspect <id> --runtime --json' for runtime diagnostics and 'openclaw plugins list' for registry state. After fixing plugin code or load paths, run 'openclaw plugins reload <id>' to retry.`,
         );
       }
     }
@@ -456,6 +458,9 @@ export function loadOpenClawPluginsCore(
     // then the catch below can discard this builder without poisoning a reusable cache value.
     if (cacheEnabled) {
       context.cacheState.set(context.cacheKey, registry);
+      if (loaderCacheIdentity.resolvedKey !== context.cacheKey) {
+        context.cacheState.set(loaderCacheIdentity.resolvedKey, registry);
+      }
     }
     registryInputs.set(registry, inputs);
     return registry;

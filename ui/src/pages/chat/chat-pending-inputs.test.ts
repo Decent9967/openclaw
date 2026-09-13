@@ -96,7 +96,7 @@ describe("server-owned pending input display", () => {
   });
 
   it.each([
-    { state: "queued", runId: undefined, notice: "Queued · waiting for the agent" },
+    { state: "queued", runId: undefined, notice: undefined },
     {
       state: "interrupted",
       runId: "run-queued",
@@ -287,12 +287,14 @@ describe("server-owned pending input display", () => {
           (_, index) => `source-${String(index).padStart(2, "0")}`,
         ),
       }),
+      { signal: expect.any(AbortSignal) },
     );
     await loadChatHistory(host);
     expect(host.chatMessages).toEqual([]);
     expect(host.request).toHaveBeenLastCalledWith(
       "chat.history",
       expect.objectContaining({ inputRunIds: ["source-50"] }),
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -356,6 +358,7 @@ describe("server-owned pending input display", () => {
         expect.objectContaining({
           inputRunIds: ["consumed-source", "unrelated-source"],
         }),
+        { signal: expect.any(AbortSignal) },
       );
       expect(getChatPendingInputs(host)?.page.items).toEqual([]);
       expect(host.chatRunId).toBe("aggregate-run");
@@ -865,7 +868,7 @@ describe("server-owned pending input display", () => {
     });
   });
 
-  it("labels unconsumed input as queued between its acceptance time and later output", () => {
+  it("keeps unconsumed input in order without a generic queue notice", () => {
     const earlier = { role: "assistant", content: "Earlier reply", timestamp: 50 };
     const later = { role: "assistant", content: "Later reply", timestamp: 150 };
     const items = buildChatItems({
@@ -887,11 +890,6 @@ describe("server-owned pending input display", () => {
         kind: "group",
         role: "user",
         messages: [{ message: { content: "Keep my accepted input" } }],
-      },
-      {
-        kind: "notice",
-        timestamp: input.acceptedAt,
-        text: "Queued · waiting for the agent",
       },
       { kind: "group", role: "assistant", messages: [{ message: later }] },
     ]);

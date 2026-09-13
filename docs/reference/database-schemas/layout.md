@@ -15,6 +15,24 @@ title: "Database layout"
 
 The task registry uses the shared state database. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 
+### Cold transcript archives
+
+The per-agent `session_transcript_cold_archives` table records cold transcript
+locations alongside `session_windows` and `transcript_events`. Each row belongs
+to a retained session window and identifies its generation, archive name, hash,
+counts, and sizes. The payload lives in an immutable compressed JSONL file, or
+in the row's blob when embedded by a supported backup.
+
+The default archive directory is
+`~/.openclaw/agents/<agentId>/sessions/cold/`, with filenames
+`<sha256>.jsonl.zst`. A database in a directory named `agent` uses its sibling
+`sessions/cold/` directory; other store layouts use `cold/` beside the database.
+These files contain authoritative history. See
+[cold transcript storage](/reference/session-management-compaction/maintenance#cold-transcript-storage)
+for retention and restoration, and
+[agent schema 20](/reference/database-schemas/agent-schema-history#cold-transcript-storage)
+for the schema and update contract.
+
 ### Plugin state listing index
 
 Plugin keyed stores use the shared `plugin_state_entries` table. Its listing
@@ -284,6 +302,14 @@ the normal owner can finish initialization through its existing empty-database
 recovery path; committed rows remain governed by SQLite's normal transactions.
 This change requires no schema migration. See the
 [accepted initialization design](https://github.com/openclaw/openclaw/pull/144155).
+
+### Managed worktree acceleration templates
+
+[Managed worktree acceleration](/concepts/managed-worktrees#filesystem-acceleration) uses the first-use `worktree_templates` table in the shared state database. Each row records a reconstructible source template: repository and Git common directory, destination root, filesystem backend, artifact path, source commit, checkout content key, preparation status, and creation and last-use timestamps. The cache key allows one template per repository and destination root. The template contains no provisioned ignored files or repository setup output.
+
+The worktree service owns template creation, reuse, invalidation, and cleanup under its existing allocation lease. It reserves a `preparing` row before creating the artifact and publishes `ready` only after preparation completes. Durable mutations recheck the lease inside synchronous state transactions; filesystem work runs outside those transactions. Cleanup uses the reserved template ID so an old operation cannot delete its replacement. Templates are replaced when the commit or checkout policy changes and retired after seven days without use.
+
+The additive table is ensured on first use and does not change the numeric database schema version. Existing worktree and snapshot records retain their meaning; no existing checkout is migrated or moved. Template artifacts are reconstructible, while registered worktree contents and recovery snapshots retain their existing preservation rules.
 
 ### Cloud repository workspaces
 
