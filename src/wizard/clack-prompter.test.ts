@@ -540,7 +540,9 @@ describe("createClackPrompter", () => {
     expect(clackMocks.settings.actions).toEqual(new Set(["left", "up"]));
     expect(process.stdin.listeners("end")).toEqual(initialEndListeners);
     expect(process.stdin.listeners("keypress")).toEqual(initialKeypressListeners);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expect(promptSignal?.aborted).toBe(false);
   });
 
