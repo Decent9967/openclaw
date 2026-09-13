@@ -3551,9 +3551,13 @@ describe("browser tool act compatibility", () => {
       route: { kind: "browser-control" },
       profile: "openclaw",
     });
-    expect(sessionTabRegistryMocks.touchSessionBrowserTab.mock.invocationCallOrder[0]).toBeLessThan(
-      browserClientMocks.browserSnapshot.mock.invocationCallOrder[0],
-    );
+    const ownershipCall =
+      sessionTabRegistryMocks.touchSessionBrowserTab.mock.invocationCallOrder[0];
+    const snapshotCall = browserClientMocks.browserSnapshot.mock.invocationCallOrder[0];
+    if (ownershipCall === undefined || snapshotCall === undefined) {
+      throw new Error("Expected ownership and snapshot callbacks to run");
+    }
+    expect(ownershipCall).toBeLessThan(snapshotCall);
     expect(result?.details).toMatchObject({ pageState: { ok: true, format: "ai" } });
   });
 
