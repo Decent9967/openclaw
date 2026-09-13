@@ -126,6 +126,8 @@ export function buildSlackQaConfig(
 ): OpenClawConfig {
   const codexApprovalConfig = params.overrides?.codexApproval === true;
   const progressOverrides = params.overrides?.progress;
+  const delivery = params.overrides?.delivery;
+  const enableMessageTool = params.overrides?.messageTool || delivery === "message-tool";
   const primaryModel = params.primaryModel;
   const pluginAllow = uniqueStrings([
     ...(baseCfg.plugins?.allow ?? []),
@@ -175,26 +177,37 @@ export function buildSlackQaConfig(
           },
         }
       : baseCfg.agents?.defaults;
-  const qaAgentDefaults = progressOverrides
-    ? {
-        ...codexAgentDefaults,
-        ...(progressOverrides.verboseDefault
-          ? { verboseDefault: progressOverrides.verboseDefault }
-          : {}),
-      }
-    : codexAgentDefaults;
-  const qaAgentList = progressOverrides
-    ? baseCfg.agents?.list?.map((agent) => {
-        if (agent.id !== "qa") {
-          return agent;
+  const qaAgentDefaults =
+    progressOverrides || delivery
+      ? {
+          ...codexAgentDefaults,
+          ...(delivery
+            ? {
+                blockStreamingDefault: "off" as const,
+                verboseDefault: "off" as const,
+                reasoningDefault: "off" as const,
+                thinkingDefault: "off" as const,
+                params: { ...codexAgentDefaults?.params, maxTokens: 2048 },
+              }
+            : {}),
+          ...(progressOverrides?.verboseDefault
+            ? { verboseDefault: progressOverrides.verboseDefault }
+            : {}),
         }
-        // Slack draft edits cannot preserve custom authorship. Remove the
-        // synthetic QA identity so progress scenarios reach the draft path.
-        const qaAgent = { ...agent };
-        delete qaAgent.identity;
-        return qaAgent;
-      })
-    : baseCfg.agents?.list;
+      : codexAgentDefaults;
+  const qaAgentEntries =
+    progressOverrides || delivery
+      ? Object.fromEntries(
+          Object.entries(baseCfg.agents?.entries ?? {}).map(([id, agent]) => {
+            if (id !== "qa") return [id, agent];
+            // Slack draft edits cannot preserve custom authorship. Remove the
+            // synthetic QA identity so progress scenarios reach the draft path.
+            const qaAgent = { ...agent };
+            delete qaAgent.identity;
+            return [id, qaAgent];
+          }),
+        )
+      : baseCfg.agents?.entries;
   const execApprovalsConfig = approvalOverrides
     ? {
         enabled: true,
@@ -203,13 +216,13 @@ export function buildSlackQaConfig(
       }
     : undefined;
   const explicitToolAllow = baseCfg.tools?.allow;
-  const messageToolPolicy = params.overrides?.messageTool
+  const messageToolPolicy = enableMessageTool
     ? explicitToolAllow && explicitToolAllow.length > 0
       ? { allow: uniqueStrings([...explicitToolAllow, "message"]) }
       : { alsoAllow: uniqueStrings([...(baseCfg.tools?.alsoAllow ?? []), "message"]) }
     : {};
   const toolsConfig =
-    codexApprovalConfig || params.overrides?.messageTool
+    codexApprovalConfig || enableMessageTool
       ? {
           tools: {
             ...baseCfg.tools,
@@ -228,6 +241,7 @@ export function buildSlackQaConfig(
   return {
     ...baseCfg,
     ...approvalForwardingConfig,
+    ...(delivery ? { logging: { ...baseCfg.logging, level: "debug" as const } } : {}),
     ...toolsConfig,
     plugins: {
       ...baseCfg.plugins,
@@ -252,12 +266,12 @@ export function buildSlackQaConfig(
           : {}),
       },
     },
-    ...(codexApprovalConfig || progressOverrides
+    ...(codexApprovalConfig || progressOverrides || delivery
       ? {
           agents: {
             ...baseCfg.agents,
             ...(qaAgentDefaults ? { defaults: qaAgentDefaults } : {}),
-            ...(qaAgentList ? { list: qaAgentList } : {}),
+            ...(qaAgentEntries ? { entries: qaAgentEntries } : {}),
           },
         }
       : {}),
@@ -265,7 +279,7 @@ export function buildSlackQaConfig(
       ...baseCfg.messages,
       groupChat: {
         ...baseCfg.messages?.groupChat,
-        visibleReplies: "automatic",
+        visibleReplies: delivery === "message-tool" ? "message_tool" : "automatic",
       },
     },
     channels: {
@@ -286,31 +300,39 @@ export function buildSlackQaConfig(
               ? { dm: { enabled: true, groupEnabled: true } }
               : {}),
             replyToMode: params.overrides?.replyToMode ?? "off",
-            ...(params.overrides?.streamingMode
-              ? { streaming: { mode: params.overrides.streamingMode } }
-              : progressOverrides
-                ? {
-                    streaming: {
-                      mode: "progress" as const,
-                      // These scenarios assert the portable draft compositor and
-                      // chat.update identity. Native task streams have their own
-                      // transport proof and do not expose that draft contract.
-                      nativeTransport: false,
-                      progress: {
-                        // The per-run command marker is the tool-line correlation
-                        // key; the product default intentionally hides raw commands.
-                        commandText: "raw" as const,
-                        label: false,
-                        maxLines: 4,
-                        ...(progressOverrides.style ? { style: progressOverrides.style } : {}),
-                        toolProgress: progressOverrides.toolProgress,
-                        ...(progressOverrides.commentary === undefined
-                          ? {}
-                          : { commentary: progressOverrides.commentary }),
+            ...(delivery
+              ? {
+                  streaming: {
+                    mode: delivery === "progress" ? ("progress" as const) : ("off" as const),
+                    nativeTransport: delivery === "progress",
+                    block: { enabled: false },
+                  },
+                }
+              : params.overrides?.streamingMode
+                ? { streaming: { mode: params.overrides.streamingMode } }
+                : progressOverrides
+                  ? {
+                      streaming: {
+                        mode: "progress" as const,
+                        // These scenarios assert the portable draft compositor and
+                        // chat.update identity. Native task streams have their own
+                        // transport proof and do not expose that draft contract.
+                        nativeTransport: false,
+                        progress: {
+                          // The per-run command marker is the tool-line correlation
+                          // key; the product default intentionally hides raw commands.
+                          commandText: "raw" as const,
+                          label: false,
+                          maxLines: 4,
+                          ...(progressOverrides.style ? { style: progressOverrides.style } : {}),
+                          toolProgress: progressOverrides.toolProgress,
+                          ...(progressOverrides.commentary === undefined
+                            ? {}
+                            : { commentary: progressOverrides.commentary }),
+                        },
                       },
-                    },
-                  }
-                : {}),
+                    }
+                  : {}),
             ...(execApprovalsConfig ? { execApprovals: execApprovalsConfig } : {}),
             channels: {
               [params.channelId]: {
