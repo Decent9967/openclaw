@@ -1587,6 +1587,100 @@ fi
     }
   });
 
+  it.each(
+    ["path", "apk"].flatMap((route) =>
+      ["version", "npm", "sqlite"].map((failure) => ({ route, failure })),
+    ),
+  )("preserves the active runtime when $route rejects $failure", ({ route, failure }) => {
+    const root = tempDirs.make("openclaw-install-cli-preserve-runtime-");
+    const bin = join(root, "candidate");
+    const prefix = join(root, "prefix");
+    const oldRuntime = join(root, "old-runtime");
+    mkdirSync(bin);
+    linkRequiredShellTools(bin);
+    mkdirSync(join(oldRuntime, "bin"), { recursive: true });
+    symlinkSync(nodeExecutable, join(oldRuntime, "bin", "node"));
+    mkdirSync(join(prefix, "tools"), { recursive: true });
+    symlinkSync(oldRuntime, join(prefix, "tools", "node"));
+    if (failure === "version") {
+      writeFileSync(join(bin, "node"), "#!/bin/bash\nprintf 'v22.18.0\\n'\n", {
+        mode: 0o755,
+      });
+    } else if (failure === "sqlite") {
+      writeFileSync(
+        join(bin, "node"),
+        '#!/bin/bash\nif [[ "$1" == -e ]]; then exit 1; fi\nexec "$FIXTURE_NODE" "$@"\n',
+        { mode: 0o755 },
+      );
+    } else {
+      symlinkSync(nodeExecutable, join(bin, "node"));
+    }
+    writeFileSync(join(bin, "npm"), `#!/bin/bash\nexit ${failure === "npm" ? 42 : 0}\n`, {
+      mode: 0o755,
+    });
+    const result = runInstallCliShell(
+      `
+      source ${SCRIPT_PATH}
+      PREFIX="$FIXTURE_PREFIX"
+      PATH="$FIXTURE_BIN"
+      export PATH
+      APK_NODE_BIN_DIR="$FIXTURE_BIN"
+      is_root() { return 0; }
+      apk() { printf 'apk called\\n'; }
+      ${route === "path" ? "try_link_usable_node_runtime_from_path" : "install_alpine_node"}
+      `,
+      { FIXTURE_PREFIX: prefix, FIXTURE_BIN: bin, FIXTURE_NODE: nodeExecutable },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    if (route === "apk") {
+      expect(result.stdout).toContain("apk called");
+      expect(result.stdout).toContain("Alpine Node package must provide Node >=");
+    }
+    expect(readlinkSync(join(prefix, "tools", "node"))).toBe(oldRuntime);
+    expect(readlinkSync(join(oldRuntime, "bin", "node"))).toBe(nodeExecutable);
+    expect(existsSync(join(prefix, "tools", "node-v24.19.0"))).toBe(false);
+  });
+
+  it("excludes active runtime aliases when selecting Node and optional tools", () => {
+    const root = tempDirs.make("openclaw-install-cli-runtime-alias-");
+    const bin = join(root, "system-bin");
+    const prefix = join(root, "prefix");
+    const oldRuntime = join(root, "old-runtime");
+    const oldBin = join(oldRuntime, "bin");
+    const aliasBin = join(root, "alias-bin");
+    mkdirSync(bin);
+    linkRequiredShellTools(bin);
+    mkdirSync(oldBin, { recursive: true });
+    for (const target of [bin, oldBin]) {
+      symlinkSync(nodeExecutable, join(target, "node"));
+      writeFileSync(join(target, "npm"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+    }
+    for (const tool of ["npx", "corepack"]) {
+      writeFileSync(join(oldBin, tool), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+    }
+    mkdirSync(join(prefix, "tools"), { recursive: true });
+    symlinkSync(oldRuntime, join(prefix, "tools", "node"));
+    symlinkSync(join(prefix, "tools", "node", "bin"), aliasBin);
+    const result = runInstallCliShell(
+      `
+      source ${SCRIPT_PATH}
+      PREFIX="$FIXTURE_PREFIX"
+      PATH="$FIXTURE_ALIAS:$FIXTURE_BIN"
+      export PATH
+      try_link_usable_node_runtime_from_path
+      `,
+      { FIXTURE_PREFIX: prefix, FIXTURE_ALIAS: aliasBin, FIXTURE_BIN: bin },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const active = join(prefix, "tools", "node", "bin");
+    expect(readlinkSync(join(active, "node"))).toBe(join(bin, "node"));
+    expect(readlinkSync(join(active, "npm"))).toBe(join(bin, "npm"));
+    for (const tool of ["npx", "corepack"]) {
+      expect(readdirSync(active)).not.toContain(tool);
+      expect(readFileSync(join(oldBin, tool), "utf8")).toBe("#!/bin/bash\nexit 0\n");
+    }
+  });
+
   it("rejects Alpine/musl Node packages below the requested runtime floor", () => {
     const tmp = mkdtempSync(join(tmpdir(), "openclaw-install-cli-alpine-old-node-"));
     const bin = join(tmp, "bin");
