@@ -749,11 +749,15 @@ describe("secrets tool", () => {
           timeoutMs: 60_000,
         }),
       );
-      const error = new GatewayClientRequestError({
-        code: "INVALID_REQUEST",
-        message: "registration refused",
-        ...(reason ? { details: { reason } } : {}),
-      });
+      const error = reason
+        ? Object.assign(new Error("registration refused"), {
+            name: "GatewayClientRequestError",
+            details: { reason },
+          })
+        : new GatewayClientRequestError({
+            code: "INVALID_REQUEST",
+            message: "registration refused",
+          });
       const gateway = questionManagerGateway(manager, () => {
         if (abort) {
           controller.abort(new Error("run stopped"));
