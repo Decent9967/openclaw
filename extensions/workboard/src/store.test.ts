@@ -375,7 +375,7 @@ describe("WorkboardStore", () => {
           harness.operation.delete(child.id, { expectedUpdatedAt: current?.updatedAt }),
         ).resolves.toEqual({ deleted: true });
       } finally {
-        harness.close();
+        await harness.close();
       }
     },
   );
@@ -420,7 +420,7 @@ describe("WorkboardStore", () => {
           });
         }
       } finally {
-        harness.close();
+        await harness.close();
       }
     },
   );
@@ -454,7 +454,7 @@ describe("WorkboardStore", () => {
         });
         await expect(harness.host.get(base.id)).resolves.toEqual(newer);
       } finally {
-        harness.close();
+        await harness.close();
       }
     },
   );
