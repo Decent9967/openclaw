@@ -87,9 +87,14 @@ export async function handleCanvasDocumentHttpRequest(
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Content-Length", String(Buffer.byteLength(body)));
       if ((await resolveDocumentSandbox(root, relativePath)) === "scripts") {
+        // Registered documents allow local renderer scripts in their own CSP;
+        // the response policy must preserve that permission because policies intersect.
         res.setHeader(
           "Content-Security-Policy",
-          buildBoardWidgetContentSecurityPolicy({ grantState: "none" }),
+          buildBoardWidgetContentSecurityPolicy({
+            grantState: "none",
+            resourceOrigins: ["'self'"],
+          }),
         );
         res.setHeader("Referrer-Policy", "no-referrer");
       }
