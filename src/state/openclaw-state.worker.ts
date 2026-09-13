@@ -1,4 +1,9 @@
 import {
+  patchConfigHealthEntryInDatabase,
+  readConfigHealthSnapshotInDatabase,
+} from "../config/io.health-state.kernel.js";
+import { createSqliteAuditRecordKernel } from "../infra/sqlite-audit-record.kernel.js";
+import {
   readStableSqliteFileGeneration,
   sameSqliteFileGeneration,
 } from "../infra/sqlite-file-generation.js";
@@ -39,6 +44,7 @@ import {
 } from "./openclaw-state-db-cache.js";
 import {
   withArtifactPreservingStateReads,
+  withExistingOpenClawStateDatabaseArtifactPreservingReadOnly,
   withExistingOpenClawStateDatabaseReadOnly,
 } from "./openclaw-state-db-readonly.js";
 import { withSharedStateWriteCoordinator } from "./openclaw-state-db-write-coordination.js";
@@ -200,6 +206,33 @@ export function openExistingSqliteWorkerBackend(
             ...(observed ? { current: observed } : {}),
           };
         }
+      }
+      if (command.type === "config.health.read") {
+        const read = command.input.artifactPreserving
+          ? withExistingOpenClawStateDatabaseArtifactPreservingReadOnly
+          : withExistingOpenClawStateDatabaseReadOnly;
+        return (
+          read(({ db }) => readConfigHealthSnapshotInDatabase(db), {
+            path: context.databasePath,
+            env: getSqliteWorkerStateContext().environment,
+          }) ?? { state: {}, basis: {} }
+        );
+      }
+      const writeOptions = {
+        path: context.databasePath,
+        env: getSqliteWorkerStateContext().environment,
+      };
+      if (command.type === "config.health.patch") {
+        const { configPath, patch, expected, updatedAtMs } = command.input;
+        return runOpenClawStateWriteTransaction(({ db }) => {
+          return patchConfigHealthEntryInDatabase(db, configPath, patch, expected, updatedAtMs);
+        }, writeOptions);
+      }
+      if (command.type === "diagnostic.register") {
+        const { scope, maxEntries, record } = command.input;
+        return runOpenClawStateWriteTransaction(({ db }) => {
+          createSqliteAuditRecordKernel(db, { scope, maxEntries }).register(record);
+        }, writeOptions);
       }
       const { db } = open();
       return runSqliteDeferredTransactionSync(db, () => {
