@@ -1952,7 +1952,7 @@ src/agents/tools/ask-user-tool.ts	8
 src/agents/tools/automations-tool-name.ts	1
 src/agents/tools/chat-history-text.ts	3
 src/agents/tools/common.ts	2
-src/agents/tools/computer-tool-node.ts	2
+src/agents/tools/computer-tool-node.ts	1
 src/agents/tools/computer-tool-request.ts	3
 src/agents/tools/computer-tool.ts	2
 src/agents/tools/conversation-tools.ts	3

@@ -4,6 +4,11 @@ const currentModuleUrl = import.meta.url;
 export const SQLITE_READONLY_CHILD_ARG = "--openclaw-sqlite-readonly-child";
 
 export const runtimeProcessEntrypoints = {
+  computerHost: {
+    currentModuleUrl,
+    sourceWorkerName: "../gateway/desktop/computer.worker",
+    distWorkerPath: "gateway/desktop/computer.worker.js",
+  },
   imageProcessor: {
     currentModuleUrl,
     sourceWorkerName: "../media/image-processor.worker",

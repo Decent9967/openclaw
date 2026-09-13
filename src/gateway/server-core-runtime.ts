@@ -118,11 +118,18 @@ export async function startGatewayCoreRuntime(input: {
     workerPlacementControlAvailable,
     workerDesktopObserveAvailable,
     desktopSessionRegistry,
+    gatewayComputerService,
     listStartupChannelGatewayMethods,
     workerEnvironmentStartup,
     activateRuntimeSecrets,
   } = runtime;
-  runtime.registerGatewayLifetimeSidecars({ stop: () => desktopSessionRegistry.stopAll() });
+  runtime.registerGatewayLifetimeSidecars({
+    preparePluginReload: gatewayComputerService.preparePluginReload,
+    stop: async () => {
+      await gatewayComputerService.close();
+      await desktopSessionRegistry.stopAll();
+    },
+  });
   const secretEgressProxy =
     cfgAtStart.secrets?.egressProxy?.enabled === true
       ? await import("../secrets/egress-proxy/runtime.js").then((egressRuntime) =>

@@ -4450,6 +4450,38 @@ public struct CommandsListResult: Codable, Sendable {
     }
 }
 
+public struct ComputerInvokeParams: Codable, Sendable {
+    public let command: String
+    public let params: [String: AnyCodable]
+    public let generation: String
+    public let timeoutms: Int?
+    public let idempotencykey: String
+
+    public init(
+        command: String,
+        params: [String: AnyCodable],
+        generation: String,
+        timeoutms: Int? = nil,
+        idempotencykey: String)
+    {
+        self.command = command
+        self.params = params
+        self.generation = generation
+        self.timeoutms = timeoutms
+        self.idempotencykey = idempotencykey
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case params
+        case generation
+        case timeoutms = "timeoutMs"
+        case idempotencykey = "idempotencyKey"
+    }
+}
+
+public struct ComputerStatusParams: Codable, Sendable {}
+
 public struct ConfigApplyParams: Codable, Sendable {
     public let raw: String
     public let basehash: String?
