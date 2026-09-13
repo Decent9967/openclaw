@@ -11,6 +11,12 @@ import { runWithToolExecutionValidation } from "./agent-tools.execution-validati
 import { getChannelAgentToolMeta } from "./channel-tool-metadata.js";
 import { captureAgentPluginRuntimeRefresh } from "./plugin-runtime-refresh.js";
 import type { AgentToolResult } from "./runtime/index.js";
+import {
+  captureToolOutputSelection,
+  readToolOutputSchemaVariants,
+  type ToolOutputSelection,
+  selectToolOutputSchema,
+} from "./schema/tool-output-schema.js";
 import { bindJoinedCollectorInvocation } from "./subagents/swarm/swarm-collector-capability.js";
 import { markToolContractFailure } from "./tool-contract-error.js";
 import { isAgentToolReplaySafe } from "./tool-replay-safety.js";
@@ -277,15 +283,31 @@ async function validateCatalogSchemaValue(
   entry: ToolSearchCatalogEntry,
   schemaName: CatalogSchemaName,
   value: unknown,
+  outputSelection?: ToolOutputSelection,
 ): Promise<CatalogSchemaValidation | undefined> {
-  const schema =
+  let schema =
     schemaName === "inputSchema"
       ? resolveAgentToolExecutionSchema(entry.tool, entry.parameters)
       : entry.outputSchema;
-  if (entry.source !== "openclaw" || !schema) {
+  if (entry.source !== "openclaw") {
     return undefined;
   }
   try {
+    if (schemaName === "outputSchema") {
+      if (
+        outputSelection &&
+        readToolOutputSchemaVariants(schema)?.inputProperty !== outputSelection.inputProperty
+      ) {
+        throw new Error("Tool output discriminator changed during execution.");
+      }
+      schema = selectToolOutputSchema(
+        schema,
+        outputSelection ? { [outputSelection.inputProperty]: outputSelection.value } : undefined,
+      );
+    }
+    if (!schema) {
+      return undefined;
+    }
     schemaValidatorModulePromise ??= import("../plugins/schema-validator.js");
     const { validateJsonSchemaValue } = await schemaValidatorModulePromise;
     return validateJsonSchemaValue({
@@ -322,8 +344,9 @@ async function assertCatalogOutputSchemaIsValid(entry: ToolSearchCatalogEntry): 
 async function assertCatalogOutputMatchesSchema(
   entry: ToolSearchCatalogEntry,
   result: AgentToolResult<unknown>,
+  outputSelection?: ToolOutputSelection,
 ): Promise<void> {
-  if (!entry.outputSchema) {
+  if (!entry.outputSchema && !outputSelection) {
     return;
   }
   if (isPreExecutionBlockedToolResult(result)) {
@@ -338,6 +361,7 @@ async function assertCatalogOutputMatchesSchema(
     entry,
     "outputSchema",
     unwrapToolResultValue(result),
+    outputSelection,
   );
   if (!validation || validation.ok) {
     return;
@@ -566,6 +590,12 @@ export class ToolSearchRuntime {
     const toolCallId = `tool_search_code:${parentId}:${entry.name}:${++this.callSequence}`;
     bindJoinedCollectorInvocation(entry.tool, toolCallId);
     await assertCatalogOutputSchemaIsValid(entry);
+    const outputVariants =
+      entry.source === "openclaw" ? readToolOutputSchemaVariants(entry.outputSchema) : undefined;
+    const callerOutputSelection = outputVariants
+      ? captureToolOutputSelection(outputVariants.inputProperty, normalizedInput)
+      : undefined;
+    let executedOutputSelection: ToolOutputSelection | undefined;
     const executeTool =
       this.ctx.executeTool ??
       (async (params: Parameters<ToolSearchCatalogToolExecutor>[0]) => {
@@ -591,12 +621,20 @@ export class ToolSearchRuntime {
         candidate === acceptedSnapshot
           ? candidate
           : snapshotToolSearchTargetTranscriptResult(candidate);
-      await assertCatalogOutputMatchesSchema(entry, snapshot);
+      await assertCatalogOutputMatchesSchema(entry, snapshot, executedOutputSelection);
+      // Hook rewrites must also satisfy the result type advertised to the caller.
+      if (callerOutputSelection && callerOutputSelection.value !== executedOutputSelection?.value) {
+        await assertCatalogOutputMatchesSchema(entry, snapshot, callerOutputSelection);
+      }
       acceptedSnapshot = snapshot;
       return snapshot;
     };
     const validateInput = this.options.validateInput && entry.source === "openclaw";
-    const executionTool = prepareToolSearchCatalogExecutionTool(entry, this.options);
+    const validateExecution = validateInput || outputVariants !== undefined;
+    const executionTool = prepareToolSearchCatalogExecutionTool(entry, {
+      ...this.options,
+      validateInput: validateExecution,
+    });
     const runExecution = async () => {
       this.pluginRuntimeRefresh.assertCurrent();
       const parentToolCallId = options?.parentToolCallId ?? toolCallId;
@@ -647,10 +685,21 @@ export class ToolSearchRuntime {
     };
     let acceptedResult: AgentToolResult<unknown> | undefined;
     try {
-      const result = validateInput
+      const result = validateExecution
         ? await runWithToolExecutionValidation(
             toolCallId,
-            async (finalInput) => await assertCatalogInputMatchesSchema(entry, finalInput),
+            async (finalInput) => {
+              if (validateInput) {
+                await assertCatalogInputMatchesSchema(entry, finalInput);
+              }
+              if (outputVariants) {
+                // Retain the prepared primitive, not an input object the tool can mutate.
+                executedOutputSelection = captureToolOutputSelection(
+                  outputVariants.inputProperty,
+                  finalInput,
+                );
+              }
+            },
             runExecution,
           )
         : await runExecution();
