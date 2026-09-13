@@ -3424,6 +3424,63 @@ Update and merge these partial structured summaries.`,
     expect(outputText(payload)).toBe(expected);
   });
 
+  it("consumes a current private completion to spawn once, then remains silent", async () => {
+    const server = await startMockServer();
+    const nonce = "QA-PARENT-PRIVATE-CHILD1-0123456789ABCDEF0123456789ABCDEF";
+    const kickoff = makeUserInput("Subagent terminal reply QA check: private.");
+    const firstReceipt = makeToolOutputWithCallId(
+      "first",
+      JSON.stringify({ status: "accepted", childSessionKey: "agent:qa:subagent:first" }),
+    );
+    const completion = makeUserInput(
+      TEST_RUNTIME_CONTEXT_CARRIER.replace(
+        "runtime metadata",
+        `[Internal task completion event]\nResult: ${nonce}`,
+      ),
+    );
+    const second = await expectNonStreamingResponsesJson(server, {
+      tools: [SESSIONS_SPAWN_TOOL],
+      input: [kickoff, firstReceipt, completion],
+    });
+    const call = outputItems(second).find((item) => item.type === "function_call");
+    if (!call) {
+      throw new Error("Expected second private child spawn");
+    }
+    expect(call?.name).toBe("sessions_spawn");
+    expect(JSON.parse(String(call?.arguments))).toMatchObject({
+      label: "qa-terminal-private-second",
+      completionTarget: "parent",
+      task: expect.stringContaining(nonce),
+    });
+    const secondReceipt = makeToolOutputWithCallId(
+      String(call?.call_id),
+      JSON.stringify({ status: "accepted", childSessionKey: "agent:qa:subagent:second" }),
+    );
+    const silent = await expectNonStreamingResponsesJson(server, {
+      tools: [SESSIONS_SPAWN_TOOL],
+      input: [kickoff, firstReceipt, completion, call, secondReceipt],
+    });
+    expect(outputText(silent)).toBe("NO_REPLY");
+    const settled = await expectNonStreamingResponsesJson(server, {
+      tools: [SESSIONS_SPAWN_TOOL],
+      input: [
+        kickoff,
+        firstReceipt,
+        completion,
+        call,
+        secondReceipt,
+        makeUserInput(
+          TEST_RUNTIME_CONTEXT_CARRIER.replace(
+            "runtime metadata",
+            "[Internal task completion event]\nResult: QA-PARENT-PRIVATE-CHILD2-DONE",
+          ),
+        ),
+      ],
+    });
+    expect(outputText(settled)).toBe("NO_REPLY");
+    expect(outputItems(settled).some((item) => item.type === "function_call")).toBe(false);
+  });
+
   it("binds crossed same-case parent responses to their matching workers", async () => {
     const server = await startMockServer();
     const firstChildSessionKey = "agent:qa:subagent:child-1";

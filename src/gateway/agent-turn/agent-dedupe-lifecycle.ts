@@ -44,6 +44,21 @@ export function createAgentDedupeLifecycle(params: {
     if (reserved) {
       return;
     }
+    // A private retry bypasses terminal cache replay to reconcile durable input.
+    // Preserve an exact intentional Stop for the resolved admission guard.
+    if (
+      isPreRegistrationAbortedAgentDedupeEntryForSession({
+        entry: readGatewayDedupeEntry({
+          dedupe: params.context.dedupe,
+          keys: params.agentDedupeKeys,
+        }),
+        runId: params.runId,
+        sessionKey,
+        agentId: dedupeAgentId,
+      })
+    ) {
+      return;
+    }
     const acceptedAt = Date.now();
     const pendingTimeoutMs = resolveAgentTimeoutMs({
       cfg: params.cfg,

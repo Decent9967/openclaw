@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildAgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.js";
 import {
   claimExecApprovalFollowupRuntimeHandoff,
   finalizeExecApprovalFollowupRuntimeHandoff,
@@ -40,6 +41,7 @@ import {
 import type { AgentTurnContext, AgentTurnPrincipal } from "./types.js";
 
 export type PreparedAgentRunUserTurn = {
+  privateCompletion?: true;
   bashElevated?: ExecElevatedDefaults;
   claimedExecApprovalFollowupHandoffId?: string;
   execApprovalFollowupHandoffClaimId: string;
@@ -49,10 +51,15 @@ export type PreparedAgentRunUserTurn = {
   recorder?: UserTurnTranscriptRecorder;
   senderIsOwner: boolean;
   suppressPromptPersistence: boolean;
+  releaseProcessingAbortObserver?: () => void;
 };
 
 export async function prepareAgentRunUserTurn(params: {
   assertCurrent: () => void;
+  assertCompletionCurrent?: () => void;
+  privateCompletion?: true;
+  abortSignal?: AbortSignal;
+  getAbortStopReason?: () => string;
   request: AgentRunRequest;
   cfg: OpenClawConfig;
   cfgForAgent?: OpenClawConfig;
@@ -130,12 +137,25 @@ export async function prepareAgentRunUserTurn(params: {
     const senderIsOwner = params.restoredCronContinuation
       ? true
       : clientHasAdminScope(params.client);
+    if (
+      params.privateCompletion &&
+      (params.request.deliver !== false ||
+        params.request.expectedExistingSessionId !== params.admittedSessionId ||
+        !params.runId.startsWith("announce:") ||
+        params.inputProvenance?.kind !== "inter_session" ||
+        !["subagent_announce", "subagent_settle"].includes(params.inputProvenance.sourceTool ?? ""))
+    ) {
+      throw new Error(
+        "Private completion requires an exact internal requester turn with delivery disabled",
+      );
+    }
     const suppressPromptPersistence =
-      params.requestedPromptPersistenceSuppression ||
-      shouldSuppressAgentPromptPersistence({
-        inputProvenance: params.inputProvenance,
-        internalEvents: params.request.internalEvents,
-      });
+      !params.privateCompletion &&
+      (params.requestedPromptPersistenceSuppression ||
+        shouldSuppressAgentPromptPersistence({
+          inputProvenance: params.inputProvenance,
+          internalEvents: params.request.internalEvents,
+        }));
     let recorder: UserTurnTranscriptRecorder | undefined;
     if (
       params.resolvedSessionKey &&
@@ -154,6 +174,7 @@ export async function prepareAgentRunUserTurn(params: {
         entry.imageKind ? [{ kind: entry.imageKind, factIndex }] : [],
       );
       const input: UserTurnInput = {
+        ...(params.privateCompletion ? { display: false as const } : {}),
         text:
           persistedMedia.omission === "inline-image-save-failed"
             ? [effectiveTranscriptInputText, INLINE_IMAGE_DURABLE_OMISSION_MARKER]
@@ -169,6 +190,7 @@ export async function prepareAgentRunUserTurn(params: {
         ...(slots.length > 0 ? { mediaImageLayout: { slots } } : {}),
       };
       recorder = createUserTurnTranscriptRecorder({
+        trackInputCompletion: params.privateCompletion,
         input,
         target: () => {
           const loaded = loadSessionEntry(params.resolvedSessionKey!, {
@@ -207,13 +229,42 @@ export async function prepareAgentRunUserTurn(params: {
         !(await recorder.stageApproved!({
           runId: params.runId,
           assertCurrent: params.assertCurrent,
-        }))
+          assertCompletionCurrent: params.assertCompletionCurrent,
+        })) &&
+        !recorder.getProcessingCompletion?.()
       ) {
         throw new Error("agent turn was not durably admitted");
       }
     }
 
+    let releaseProcessingAbortObserver: (() => void) | undefined;
+    if (params.privateCompletion && recorder && !recorder.getProcessingCompletion?.()) {
+      const recordAbort = () => {
+        try {
+          recorder.completeProcessing?.(
+            buildAgentRunTerminalOutcome({
+              status: "error",
+              stopReason: params.getAbortStopReason?.() ?? "rpc",
+            }),
+          );
+        } catch (error) {
+          params.context.logGateway.warn(
+            `private input cancellation persistence failed: ${formatForLog(error)}`,
+          );
+        }
+      };
+      // Abort reserves terminal ownership before notifying listeners. Record
+      // the stop while that exact controller still exists, even after input consumption.
+      params.abortSignal?.addEventListener("abort", recordAbort, { once: true });
+      releaseProcessingAbortObserver = () =>
+        params.abortSignal?.removeEventListener("abort", recordAbort);
+      if (params.abortSignal?.aborted) {
+        recordAbort();
+      }
+    }
     return {
+      ...(params.privateCompletion ? { privateCompletion: true as const } : {}),
+      ...(releaseProcessingAbortObserver ? { releaseProcessingAbortObserver } : {}),
       ...(execApprovalFollowupRuntimeHandoff?.bashElevated
         ? { bashElevated: execApprovalFollowupRuntimeHandoff.bashElevated }
         : {}),
@@ -258,6 +309,7 @@ export function releasePreparedAgentRunUserTurn(
   disposition: "cancelled" | "interrupted" = "interrupted",
 ): void {
   try {
+    prepared.releaseProcessingAbortObserver?.();
     prepared.recorder?.finishPendingInput?.(disposition);
   } finally {
     releaseExecApprovalFollowupRuntimeHandoff({

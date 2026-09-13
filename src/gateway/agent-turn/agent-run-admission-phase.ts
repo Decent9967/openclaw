@@ -130,6 +130,7 @@ export async function prepareAgentRunDispatch(params: {
   offloadedRefs: OffloadedRef[];
   onUserTurnMediaPersisted: () => void;
   requestedPromptPersistenceSuppression: boolean;
+  privateCompletion?: true;
   runId: string;
   agentDedupeKeys: readonly string[];
   context: AgentTurnContext;
@@ -570,22 +571,29 @@ export async function prepareAgentRunDispatch(params: {
   }
   let assertInputAdmissionCurrent = params.assertAdmissionCurrent;
   let userTurn: PreparedAgentRunUserTurn;
+  const assertInputOwnerCurrent = (terminal = false) => {
+    assertInputAdmissionCurrent?.();
+    assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+    const entry = params.context.chatAbortControllers.get(params.runId);
+    if (
+      !entry ||
+      entry !== activeRunAbort.entry ||
+      entry.operationalRunInstance !== operationalRunInstance ||
+      (!terminal && entry.registrationCleanupRequested)
+    ) {
+      throw new Error("agent input admission no longer owns this run");
+    }
+  };
   try {
     userTurn = await prepareAgentRunUserTurn({
       assertCurrent: () => {
-        assertInputAdmissionCurrent?.();
-        assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+        assertInputOwnerCurrent();
         activeRunAbort.controller.signal.throwIfAborted();
-        const entry = params.context.chatAbortControllers.get(params.runId);
-        if (
-          !entry ||
-          entry !== activeRunAbort.entry ||
-          entry.operationalRunInstance !== operationalRunInstance ||
-          entry.registrationCleanupRequested
-        ) {
-          throw new Error("agent input admission no longer owns this run");
-        }
       },
+      assertCompletionCurrent: () => assertInputOwnerCurrent(true),
+      abortSignal: activeRunAbort.controller.signal,
+      getAbortStopReason: () => activeRunAbort.entry.abortStopReason ?? "rpc",
+      privateCompletion: params.privateCompletion,
       request: params.request,
       cfg: params.cfg,
       cfgForAgent: params.cfgForAgent,
@@ -633,6 +641,27 @@ export async function prepareAgentRunDispatch(params: {
     acceptedAt: Date.now(),
     ...(taskTrackingMode === "plugin_subagent" ? { runtime: resolvedRuntime } : {}),
   };
+  const inputCompletion = userTurn.recorder?.getProcessingCompletion?.();
+  if (inputCompletion) {
+    // A durable successful processing receipt outlives process-local Gateway
+    // dedupe. Reconcile it without dispatching the parent a second time.
+    await cleanupPreaccept();
+    params.io.emitAcceptance(
+      [
+        true,
+        {
+          ...accepted,
+          status: inputCompletion.status,
+          summary: inputCompletion.reason,
+          ...(inputCompletion.stopReason ? { stopReason: inputCompletion.stopReason } : {}),
+          ...(inputCompletion.reason === "completed" ? { inputProcessingCompleted: true } : {}),
+        },
+        undefined,
+      ],
+      { runId: params.runId },
+    );
+    return undefined;
+  }
   params.markAgentRunAccepted(true);
   setGatewayDedupeEntries({
     dedupe: params.context.dedupe,

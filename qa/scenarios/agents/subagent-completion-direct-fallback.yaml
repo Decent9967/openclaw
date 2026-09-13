@@ -25,6 +25,7 @@ scenario:
     - Exact worker NO_REPLY stays private while required parent completion represents missing child output visibly exactly once.
     - Gateway restart does not replay prior terminal payloads or synthesize interruption notices for already-settled handoffs, and a post-restart completion is delivered exactly once.
     - Direct fallback strips protected internal metadata before one channel delivery.
+    - A private parent consumes a child-only nonce, spawns a second child with messaging denied, remains silent, and does not replay either result after restart.
   docsRefs:
     - docs/tools/subagents.md
     - docs/help/testing.md
@@ -186,6 +187,97 @@ flow:
               - set: appendVerdict
                 value:
                   expr: "verdicts.push({ case: terminalCase.name, conversationId, taskId: terminalTask.taskId, taskDeliveryStatus: terminalTask.deliveryStatus, inputDisposition: terminalCase.name, representation: terminalCase.name === 'silent' ? 'visible representation of private child silence or missing output' : 'exact terminal text', restart: false, fallback: terminalCase.name === 'fallback', expectedTerminalSendCount: terminalCase.expectedSendCount, actualTerminalSendCount: matchingOutbound.length, capturedTerminalPayloads: matchingOutbound.map((message) => String(message.text ?? '')), auxiliaryChannelEvents: caseOutbound.filter((message) => !matchingOutbound.includes(message)).map((message) => String(message.text ?? '')), silenceTokenLeaked: caseOutbound.some((message) => String(message.text ?? '').trim() === 'NO_REPLY'), internalMetadataLeak: caseOutbound.some((message) => String(message.text ?? '').includes(config.metadataSentinel)), pass: true })"
+        # Denying outbound messaging must not disable the parent's orchestration tools.
+        - call: restartGatewayWithConfigPatch
+          args:
+            - env:
+                ref: env
+              patch:
+                expr: "({ tools: { deny: ['message'] }, agents: { entries: { qa: { tools: { deny: ['message'] } } } } })"
+        - call: waitForGatewayHealthy
+          args:
+            - ref: env
+            - 180000
+        - call: waitForQaChannelReady
+          args:
+            - ref: env
+            - 180000
+        - set: privateStartIndex
+          value:
+            expr: state.getSnapshot().messages.length
+        - set: privateRequestCursor
+          value:
+            expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
+        - set: privateConversationId
+          value:
+            expr: "`terminal-private-${randomUUID().slice(0, 8)}`"
+        - sendInbound:
+            accountId: default
+            conversation:
+              id:
+                ref: privateConversationId
+              kind: direct
+            senderId:
+              ref: privateConversationId
+            senderName: QA Private Completion Operator
+            text: "Subagent terminal reply QA check: private. Review the first child internally, use its result to start a second child, and remain silent after each completion."
+        - call: waitForCondition
+          saveAs: privateTasks
+          args:
+            - lambda:
+                async: true
+                expr: "(async () => { const tasks = (await env.gateway.call('tasks.list', { agentId: 'qa', limit: 100 }, { timeoutMs: 10000 })).tasks ?? []; const selected = ['qa-terminal-private-first', 'qa-terminal-private-second'].map((title) => tasks.find((task) => task.title === title)); return selected.every((task) => task?.status === 'completed' && task?.deliveryStatus === 'delivered') ? selected : undefined; })()"
+            - 90000
+            - 250
+        - set: privateRequests
+          value:
+            expr: "await fetchJson(`${env.mock.baseUrl}/debug/requests?after=${privateRequestCursor}`)"
+        - set: privateSpawns
+          value:
+            expr: "privateRequests.filter((request) => request.outcome === 'success' && request.plannedToolName === 'sessions_spawn')"
+        - assert:
+            expr: "privateSpawns.length === 2 && privateSpawns.every((request) => request.plannedToolArgs?.completionTarget === 'parent') && /QA-PARENT-PRIVATE-CHILD1-[A-F0-9]{32}/.test(privateSpawns[1].plannedToolArgs.task)"
+            message:
+              expr: "`private parent did not consume the first result to spawn exactly one second child: ${JSON.stringify(privateSpawns)}`"
+        - set: privateParentIds
+          value:
+            expr: 'privateSpawns.map((request) => /Runtime:[^\n]*sessionId=([^\s|]+)/.exec(request.allInputText)?.[1])'
+        - assert:
+            expr: "privateParentIds[0] && privateParentIds[0] === privateParentIds[1] && privateTasks[0].sessionKey === privateTasks[1].sessionKey"
+            message: Private continuation changed its parent session.
+        - call: readSessionTranscriptSummary
+          saveAs: privateTranscript
+          args:
+            - ref: env
+            - expr: privateTasks[0].sessionKey
+        - set: privateSpawnReceipts
+          value:
+            expr: "privateSpawns.map((request) => privateTranscript.successfulToolCallEvents?.find((event) => event.name === (request.plannedWireToolName ?? request.plannedToolName) && event.toolCallId === (env.runtimeId !== 'codex' && request.plannedToolItemId ? `${request.plannedToolCallId}|${request.plannedToolItemId}` : request.plannedToolCallId)))"
+        - assert:
+            expr: "privateSpawnReceipts.every(Boolean) && privateSpawnReceipts[1].timestamp >= privateTasks[0].endedAt && !(privateTranscript.successfulToolCallCounts.message > 0) && privateRequests.every((request) => request.plannedToolName !== 'message')"
+            message:
+              expr: "`private continuation lacks committed tool chronology or tried external messaging: tasks=${JSON.stringify(privateTasks)} transcript=${JSON.stringify(privateTranscript)}`"
+        - set: privateOutbound
+          value:
+            expr: "state.getSnapshot().messages.slice(privateStartIndex).filter((message) => message.direction === 'outbound' && !message.deleted)"
+        - assert:
+            expr: "privateOutbound.length === 1 && privateOutbound[0].conversation.id === privateConversationId && String(privateOutbound[0].text ?? '').trim() === config.parentAcknowledgment"
+            message:
+              expr: "`private completion emitted unexpected text or media on a channel: ${JSON.stringify(privateOutbound)}`"
+        - forEach:
+            items:
+              ref: privateTasks
+            item: privateTask
+            actions:
+              - set: privateFallbackReceipts
+                value:
+                  expr: "await readDirectFallbackReceipts(privateTask)"
+              - assert:
+                  expr: "privateFallbackReceipts.length === 0"
+                  message: Private result reached the direct channel fallback.
+        - set: appendPrivateVerdict
+          value:
+            expr: "verdicts.push({ case: 'private', conversationId: privateConversationId, taskIds: privateTasks.map((task) => task.taskId), taskDeliveryStatus: 'delivered', privateSpawnReceiptCount: privateSpawnReceipts.length, messageToolDenied: true, expectedTerminalSendCount: 0, actualTerminalSendCount: privateOutbound.length - 1, capturedTerminalPayloads: [], pass: true })"
         # Every prior task is now terminal and delivery-settled, so restart from
         # the lifecycle boundary rather than waiting an arbitrary grace period.
         - set: preRestartOutbound
@@ -196,7 +288,7 @@ flow:
             expr: "preRestartOutbound.filter((message) => verdicts.some((verdict) => verdict.capturedTerminalPayloads.includes(message.text)))"
         - set: restartPatch
           value:
-            expr: "({ gateway: { controlUi: { allowedOrigins: [`http://127.0.0.1:${64000 + Math.floor(Math.random() * 999)}`] } } })"
+            expr: "({ tools: { deny: [] }, agents: { entries: { qa: { tools: { deny: [] } } } }, gateway: { controlUi: { allowedOrigins: [`http://127.0.0.1:${64000 + Math.floor(Math.random() * 999)}`] } } })"
         - call: restartGatewayWithConfigPatch
           args:
             - env:
@@ -283,7 +375,7 @@ flow:
           value:
             expr: "verdicts.push({ case: 'restart', conversationId: restartConversationId, taskId: restartTask.taskId, taskDeliveryStatus: restartTask.deliveryStatus, inputDisposition: 'visible', restart: true, fallback: true, preRestartTerminalMessageCount: preRestartTerminalPayloads.length, postRestartTerminalPayloadCount: postRestartTerminalPayloads.length, priorTerminalPayloadReplayCount: postRestartTerminalPayloads.length - preRestartTerminalPayloads.length, unexpectedPostRestartPayloadCount: postRestartUnexpectedPayloads.length, unexpectedPostRestartPayloads: postRestartUnexpectedPayloads.map((message) => message.text), expectedTerminalSendCount: 1, actualTerminalSendCount: restartMatches.length, capturedTerminalPayloads: restartMatches.map((message) => String(message.text ?? '')), silenceTokenLeaked: false, internalMetadataLeak: false, pass: true })"
         - assert:
-            expr: "verdicts.length === 4 && verdicts.every((verdict) => verdict.pass === true)"
+            expr: "verdicts.length === 5 && verdicts.every((verdict) => verdict.pass === true)"
             message:
               expr: "`terminal reply verdict matrix incomplete: ${JSON.stringify(verdicts)}`"
       detailsExpr: "JSON.stringify({ harness: 'qa-channel + qa-lab bus + ephemeral Gateway child + mock-openai', verdicts, directFallbackProofs }, null, 2)"

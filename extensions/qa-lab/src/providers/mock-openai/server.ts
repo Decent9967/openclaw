@@ -80,6 +80,9 @@ import {
   QA_SUBAGENT_EMPTY_WORKER_NO_OUTPUT_PROMPT_RE,
   QA_SUBAGENT_SELF_YIELD_FOLLOW_UP_RE,
   QA_SUBAGENT_SELF_YIELD_WORKER_RE,
+  QA_SUBAGENT_PRIVATE_WORKER_RE,
+  QA_SUBAGENT_PRIVATE_RESULT_RE,
+  QA_SUBAGENT_PRIVATE_SECOND_RESULT,
   QA_SUBAGENT_TERMINAL_MATRIX_PROMPT_RE,
   QA_SUBAGENT_TERMINAL_MATRIX_WORKER_RE,
   buildStrandedFinalRecoveryText,
@@ -1359,12 +1362,68 @@ async function buildResponsesPayload(
       message: "Waiting for the remote job to report back.",
     });
   }
+  const privateWorker = QA_SUBAGENT_PRIVATE_WORKER_RE.exec(prompt)?.[1]?.toLowerCase();
+  if (privateWorker) {
+    const childSessionKey = resolveQaChildSessionKey(input, body);
+    if (privateWorker === "first" && childSessionKey) {
+      await options.waitForTerminalRequesterSettled?.("private", childSessionKey);
+    }
+    return buildAssistantEvents(
+      privateWorker === "first"
+        ? `QA-PARENT-PRIVATE-CHILD1-${randomUUID().replaceAll("-", "").toUpperCase()}`
+        : QA_SUBAGENT_PRIVATE_SECOND_RESULT,
+    );
+  }
   const terminalCompletionCase = extractLastMatchingUserTurn(
     input,
     QA_SUBAGENT_TERMINAL_MATRIX_PROMPT_RE,
   )
     ?.text.match(QA_SUBAGENT_TERMINAL_MATRIX_PROMPT_RE)?.[1]
     ?.toLowerCase();
+  if (terminalCompletionCase === "private") {
+    // Inspect only the latest carrier. Historical completion markers must not
+    // repeat the second spawn on the next completion or a settled-batch wake.
+    const latestUser = input.findLast((item) => item.role === "user");
+    const current = splitMockConversationContext(
+      latestUser ? extractAllRequestTexts([latestUser], {}) : "",
+    ).current;
+    const nonce = QA_SUBAGENT_PRIVATE_RESULT_RE.exec(current)?.[0];
+    const requestedSecondChild = input.some(
+      (item) =>
+        (item.type === "function_call" || item.type === "custom_tool_call") &&
+        JSON.stringify(item).includes("qa-terminal-private-second"),
+    );
+    if (/Internal task completion event/i.test(current)) {
+      if (
+        !requestedSecondChild &&
+        nonce &&
+        !current.includes(QA_SUBAGENT_PRIVATE_SECOND_RESULT) &&
+        canCallSessionsSpawn
+      ) {
+        return buildToolCallEventsWithArgs("sessions_spawn", {
+          task: `Subagent private completion QA worker: second. Review the first result ${nonce} and finish.`,
+          label: "qa-terminal-private-second",
+          completionTarget: "parent",
+          mode: "run",
+        });
+      }
+      return buildAssistantEvents("NO_REPLY");
+    }
+    if (/Every subagent spawned from this session has now settled/i.test(current)) {
+      return buildAssistantEvents("NO_REPLY");
+    }
+    if (hasCompletedToolOutput) {
+      return buildAssistantEvents("Worker started.");
+    }
+    if (canCallSessionsSpawn) {
+      return buildToolCallEventsWithArgs("sessions_spawn", {
+        task: "Subagent private completion QA worker: first. Produce a private result for your parent.",
+        label: "qa-terminal-private-first",
+        completionTarget: "parent",
+        mode: "run",
+      });
+    }
+  }
   if (terminalCompletionCase && /Internal task completion event/i.test(allInputText)) {
     const visibleRepresentation =
       terminalCompletionCase === "silent"

@@ -185,6 +185,71 @@ describe("maybeWakeRequesterAfterAllChildrenSettled", () => {
       .mockReturnValue(undefined);
   });
 
+  it.each([
+    { name: "delivered private pair", mixed: false, yielded: false, single: false },
+    { name: "delivered mixed pair", mixed: true, yielded: false, single: false },
+    { name: "yielded private child", mixed: false, yielded: true, single: true },
+    { name: "yielded mixed pair", mixed: true, yielded: true, single: false },
+  ])("keeps settled private results internal: $name", async ({ mixed, yielded, single }) => {
+    const children = (single ? ["run-b"] : ["run-a", "run-b"]).map((runId, index) =>
+      makeSettledChild({
+        runId,
+        ...(!mixed || index === 0
+          ? { completionTarget: "parent" as const, completionRequesterSessionId: "sess-main" }
+          : {}),
+        completion: {
+          required: true,
+          resultText: index === 0 ? "private marker" : "public sibling",
+        },
+        requesterSettleWake: {
+          status: "pending",
+          attemptCount: 0,
+          ...(yielded
+            ? { afterRequesterYield: true, requesterYieldBatch: true, rearmGeneration: 1 }
+            : {}),
+        },
+      }),
+    );
+    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue(children);
+    expect(await maybeWakeRequesterAfterAllChildrenSettled(wakeParams())).toBe(true);
+    expect(deliverSpy).toHaveBeenCalledOnce();
+    expect(deliveredCallArg()).toMatchObject({
+      completionTarget: "parent",
+      completionRequesterSessionId: "sess-main",
+      requireDirectDelivery: true,
+    });
+    expect(deliveredCallArg().requireVisibleReply).toBeUndefined();
+    expect(String(deliveredCallArg().triggerMessage)).toContain("private marker");
+    expect(String(deliveredCallArg().triggerMessage)).toContain("no external response is required");
+    expect(await maybeWakeRequesterAfterAllChildrenSettled(wakeParams())).toBe(false);
+    expect(deliverSpy).toHaveBeenCalledOnce();
+    expect(completeBatchSpy.mock.calls[0]?.[2]).not.toHaveProperty(
+      "requesterVisibleFinalDelivered",
+    );
+  });
+
+  it("does not pass private findings to a replacement requester incarnation", async () => {
+    const child = makeSettledChild({
+      runId: "run-b",
+      completionTarget: "parent",
+      completionRequesterSessionId: "old-parent",
+      delivery: { status: "pending" },
+      completion: { required: true, resultText: "private marker" },
+    });
+    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
+    expect(await maybeWakeRequesterAfterAllChildrenSettled(wakeParams())).toBe(false);
+    expect(deliverSpy).not.toHaveBeenCalled();
+    expect(completeBatchSpy).toHaveBeenCalledWith(
+      ["run-b"],
+      undefined,
+      expect.objectContaining({
+        delivered: false,
+        reason: "completion_handoff_unavailable",
+        disposition: "intentional_non_delivery",
+      }),
+    );
+  });
+
   it("wakes the requester once with a batch-stable idempotency key when the fan-out drains", async () => {
     registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([
       makeSettledChild({
