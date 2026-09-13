@@ -407,7 +407,11 @@ describe("private subagent completion processing receipts", () => {
       stopReason: "rpc",
     });
     expect(pending()).toEqual([]);
-    expect(await dispatch()).toMatchObject({ status: "timeout", stopReason: "rpc" });
+    expect(await observed).toMatchObject({ value: { status: "timeout", stopReason: "rpc" } });
+    // Retire only this run's process projection to exercise the durable receipt.
+    // Matching pre-admission Stop cache replay is covered separately above.
+    kernel.gatewayRequestContext.dedupe.delete(`agent:${runId}`);
+    expect(await dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
     await restart();
     expect(await dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
     expect(agentCommandMock).toHaveBeenCalledOnce();

@@ -25,7 +25,7 @@ scenario:
     - Exact worker NO_REPLY stays private while required parent completion represents missing child output visibly exactly once.
     - Gateway restart does not replay prior terminal payloads or synthesize interruption notices for already-settled handoffs, and a post-restart completion is delivered exactly once.
     - Direct fallback strips protected internal metadata before one channel delivery.
-    - A private parent consumes a child-only nonce, spawns a second child with messaging denied, remains silent, and does not replay either result after restart.
+    - A private parent consumes a child-only nonce and media reference, spawns a second child with messaging denied, remains silent, and does not replay either result after restart.
   docsRefs:
     - docs/tools/subagents.md
     - docs/help/testing.md
@@ -205,6 +205,14 @@ flow:
         - set: privateStartIndex
           value:
             expr: state.getSnapshot().messages.length
+        - set: privateEventCursor
+          value:
+            expr: state.getSnapshot().cursor
+        - call: fs.writeFile
+          args:
+            - expr: "path.join(env.gateway.workspaceDir, 'qa-private-result.png')"
+            - expr: imageUnderstandingValidPngBase64
+            - base64
         - set: privateRequestCursor
           value:
             expr: "(await fetchJson(`${env.mock.baseUrl}/debug/request-cursor`)).cursor"
@@ -239,12 +247,23 @@ flow:
             expr: "privateSpawns.length === 2 && privateSpawns.every((request) => request.plannedToolArgs?.completionTarget === 'parent') && /QA-PARENT-PRIVATE-CHILD1-[A-F0-9]{32}/.test(privateSpawns[1].plannedToolArgs.task)"
             message:
               expr: "`private parent did not consume the first result to spawn exactly one second child: ${JSON.stringify(privateSpawns)}`"
+        - assert:
+            expr: "privateSpawns[1].prompt.includes('Internal task completion event') && /MEDIA:[^\\n]*qa-private-result\\.png/.test(privateSpawns[1].prompt)"
+            message: The actual private completion carrier lost the child's media reference.
         - set: privateParentIds
           value:
             expr: 'privateSpawns.map((request) => /Runtime:[^\n]*sessionId=([^\s|]+)/.exec(request.allInputText)?.[1])'
         - assert:
             expr: "privateParentIds[0] && privateParentIds[0] === privateParentIds[1] && privateTasks[0].sessionKey === privateTasks[1].sessionKey"
             message: Private continuation changed its parent session.
+        - call: readEffectiveTools
+          saveAs: privateTools
+          args:
+            - ref: env
+            - expr: privateTasks[0].sessionKey
+        - assert:
+            expr: "!privateTools.has('message') && privateTools.has('sessions_spawn')"
+            message: Private parent tool inventory did not preserve orchestration while denying messaging.
         - call: readSessionTranscriptSummary
           saveAs: privateTranscript
           args:
@@ -259,11 +278,19 @@ flow:
               expr: "`private continuation lacks committed tool chronology or tried external messaging: tasks=${JSON.stringify(privateTasks)} transcript=${JSON.stringify(privateTranscript)}`"
         - set: privateOutbound
           value:
-            expr: "state.getSnapshot().messages.slice(privateStartIndex).filter((message) => message.direction === 'outbound' && !message.deleted)"
+            expr: "state.getSnapshot().messages.slice(privateStartIndex).filter((message) => message.direction === 'outbound')"
         - assert:
-            expr: "privateOutbound.length === 1 && privateOutbound[0].conversation.id === privateConversationId && String(privateOutbound[0].text ?? '').trim() === config.parentAcknowledgment"
+            expr: "privateOutbound.length === 1 && !privateOutbound[0].deleted && privateOutbound[0].conversation.id === privateConversationId && String(privateOutbound[0].text ?? '').trim() === config.parentAcknowledgment && (privateOutbound[0].attachments?.length ?? 0) === 0"
             message:
               expr: "`private completion emitted unexpected text or media on a channel: ${JSON.stringify(privateOutbound)}`"
+        # The event history retains payloads that were subsequently edited or deleted.
+        - set: privateOutboundEvents
+          value:
+            expr: "state.getSnapshot().events.filter((event) => event.cursor > privateEventCursor && ['outbound-message', 'message-edited', 'message-deleted'].includes(event.kind) && event.message?.direction === 'outbound')"
+        - assert:
+            expr: "privateOutboundEvents.filter((event) => event.kind === 'outbound-message').length === 1 && privateOutboundEvents.every((event) => event.message.conversation.id === privateConversationId && (event.message.attachments?.length ?? 0) === 0 && config.parentAcknowledgment.startsWith(String(event.message.text ?? '').trim()))"
+            message:
+              expr: "`private completion leaked a transient text or media payload: ${JSON.stringify(privateOutboundEvents)}`"
         - forEach:
             items:
               ref: privateTasks
@@ -277,7 +304,7 @@ flow:
                   message: Private result reached the direct channel fallback.
         - set: appendPrivateVerdict
           value:
-            expr: "verdicts.push({ case: 'private', conversationId: privateConversationId, taskIds: privateTasks.map((task) => task.taskId), taskDeliveryStatus: 'delivered', privateSpawnReceiptCount: privateSpawnReceipts.length, messageToolDenied: true, expectedTerminalSendCount: 0, actualTerminalSendCount: privateOutbound.length - 1, capturedTerminalPayloads: [], pass: true })"
+            expr: "verdicts.push({ case: 'private', conversationId: privateConversationId, taskIds: privateTasks.map((task) => task.taskId), taskDeliveryStatus: 'delivered', privateSpawnReceiptCount: privateSpawnReceipts.length, messageToolDenied: !privateTools.has('message'), mediaReferenceConsumed: true, outboundAttachmentCount: privateOutboundEvents.reduce((count, event) => count + (event.message.attachments?.length ?? 0), 0), expectedTerminalSendCount: 0, actualTerminalSendCount: privateOutbound.length - 1, capturedTerminalPayloads: [], pass: true })"
         # Every prior task is now terminal and delivery-settled, so restart from
         # the lifecycle boundary rather than waiting an arbitrary grace period.
         - set: preRestartOutbound
@@ -371,6 +398,13 @@ flow:
             expr: "postRestartUnexpectedPayloads.length === 0"
             message:
               expr: "`Gateway restart synthesized output for already-settled handoffs: ${JSON.stringify(postRestartUnexpectedPayloads)}`"
+        - set: privatePostRestartEvents
+          value:
+            expr: "state.getSnapshot().events.filter((event) => event.cursor > privateEventCursor && ['outbound-message', 'message-edited', 'message-deleted'].includes(event.kind) && event.message?.direction === 'outbound')"
+        - assert:
+            expr: "privatePostRestartEvents.every((event) => (event.message.attachments?.length ?? 0) === 0 && !/QA-PARENT-PRIVATE-CHILD1-|QA-PARENT-PRIVATE-CHILD2-DONE|qa-private-result\\.png|NO_REPLY/.test(JSON.stringify(event.message)))"
+            message:
+              expr: "`Gateway restart exposed a private result on a channel: ${JSON.stringify(privatePostRestartEvents)}`"
         - set: appendRestartVerdict
           value:
             expr: "verdicts.push({ case: 'restart', conversationId: restartConversationId, taskId: restartTask.taskId, taskDeliveryStatus: restartTask.deliveryStatus, inputDisposition: 'visible', restart: true, fallback: true, preRestartTerminalMessageCount: preRestartTerminalPayloads.length, postRestartTerminalPayloadCount: postRestartTerminalPayloads.length, priorTerminalPayloadReplayCount: postRestartTerminalPayloads.length - preRestartTerminalPayloads.length, unexpectedPostRestartPayloadCount: postRestartUnexpectedPayloads.length, unexpectedPostRestartPayloads: postRestartUnexpectedPayloads.map((message) => message.text), expectedTerminalSendCount: 1, actualTerminalSendCount: restartMatches.length, capturedTerminalPayloads: restartMatches.map((message) => String(message.text ?? '')), silenceTokenLeaked: false, internalMetadataLeak: false, pass: true })"

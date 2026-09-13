@@ -1370,7 +1370,7 @@ async function buildResponsesPayload(
     }
     return buildAssistantEvents(
       privateWorker === "first"
-        ? `QA-PARENT-PRIVATE-CHILD1-${randomUUID().replaceAll("-", "").toUpperCase()}`
+        ? `QA-PARENT-PRIVATE-CHILD1-${randomUUID().replaceAll("-", "").toUpperCase()}\nMEDIA:./qa-private-result.png`
         : QA_SUBAGENT_PRIVATE_SECOND_RESULT,
     );
   }

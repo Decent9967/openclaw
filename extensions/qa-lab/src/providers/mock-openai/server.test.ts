@@ -3424,6 +3424,16 @@ Update and merge these partial structured summaries.`,
     expect(outputText(payload)).toBe(expected);
   });
 
+  it("returns a media-bearing private child result", async () => {
+    const server = await startMockServer();
+    const payload = await expectNonStreamingResponsesJson(server, {
+      input: [makeUserInput("Subagent private completion QA worker: first.")],
+    });
+    expect(outputText(payload)).toMatch(
+      /^QA-PARENT-PRIVATE-CHILD1-[A-F0-9]{32}\nMEDIA:\.\/qa-private-result\.png$/u,
+    );
+  });
+
   it("consumes a current private completion to spawn once, then remains silent", async () => {
     const server = await startMockServer();
     const nonce = "QA-PARENT-PRIVATE-CHILD1-0123456789ABCDEF0123456789ABCDEF";
