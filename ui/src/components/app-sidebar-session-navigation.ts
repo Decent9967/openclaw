@@ -35,7 +35,7 @@ import {
   applySidebarSessionOwnerFilter,
   buildReconciledSidebarZone,
   buildSidebarSessionNavigationState,
-  compareSidebarSessionRowsByMode,
+  createSidebarSessionRowsComparator,
   collectKnownSidebarSessionCatalogIds,
   collectKnownSidebarSessionGroups,
   extendSidebarSessionSelection,
@@ -109,17 +109,11 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     getSessions: () => this.context?.sessions,
   });
 
-  protected readonly compareSidebarSessionRows = (
-    a: SessionsListResult["sessions"][number],
-    b: SessionsListResult["sessions"][number],
-  ) =>
-    compareSidebarSessionRowsByMode({
-      a,
-      b,
-      sortMode: this.effectiveSessionSortMode(),
-      owners: this.selectedAgentSessionResult()?.owners,
-      createdOrder: this.sessionProjection.createdOrder,
-    });
+  private readonly readSidebarSessionSortOptions = () => ({
+    sortMode: this.effectiveSessionSortMode(),
+    owners: this.selectedAgentSessionResult()?.owners,
+    createdOrder: this.sessionProjection.createdOrder,
+  });
 
   private sessionPeopleSortCapability(): boolean | undefined {
     const owners = this.selectedAgentSessionResult()?.owners;
@@ -197,6 +191,13 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
       this.catalogLiveRows(),
     );
 
+  sessionCatalogIdsWithoutVisibleRows = (): string[] => {
+    const visibleIds = new Set(this.sidebarSessionCatalogs().map((catalog) => catalog.id));
+    return this.visibleSessionCatalogs()
+      .filter((catalog) => !visibleIds.has(catalog.id))
+      .map((catalog) => catalog.id);
+  };
+
   private sessionSelectionAnchor: string | null = null;
   private readonly runtimeSampledAtByRow = new WeakMap<GatewaySessionRow, number>();
   private readonly attention = new SessionAttentionController(this);
@@ -241,6 +242,47 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     if (isSessionRouteId(this.activeRouteId)) {
       void this.sessionData.loadActiveSessionLineage(activeRouteKey);
     }
+    const revalidating = this.childSessionParents();
+    this.sessionData.retireStaleChildSessions(revalidating);
+    const context = this.context;
+    const client = context?.gateway.snapshot.client;
+    const scope = this.sessionData.childSessionScope;
+    if (context && client && revalidating.size > 0) {
+      const isCurrent = () =>
+        this.context === context &&
+        this.sessionData.childSessionScope === scope &&
+        context.gateway.snapshot.client === client &&
+        this.isConnected;
+      let admittedParents: Set<string> | undefined;
+      void context.connectionBootstrap
+        .run(
+          scope,
+          async () => {
+            if (isCurrent()) {
+              // Expansion can change while queued; only the current presentation owns these reads.
+              admittedParents = this.childSessionParents();
+              await Promise.all(
+                [...admittedParents].map((key) => this.sessionData.loadChildSessions(key)),
+              );
+            }
+          },
+          { background: true },
+        )
+        .then(() => {
+          // Completion-driven renders can run before the scheduler releases the batch key.
+          const completed = admittedParents;
+          if (
+            completed &&
+            isCurrent() &&
+            [...this.childSessionParents()].some((key) => !completed.has(key))
+          ) {
+            this.requestUpdate();
+          }
+        });
+    }
+  }
+
+  private childSessionParents(): Set<string> {
     const revalidating = new Set<string>();
     const pending = [...this.visibleSessionRowsInOrder()];
     while (pending.length > 0) {
@@ -254,16 +296,13 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
         (session.visuallyActive || this.isSessionChildrenExpanded(session))
       ) {
         revalidating.add(session.key);
-        // Selected collapsed rows need child liveness so delegated work does not look finished.
-        void this.sessionData.loadChildSessions(session.key);
       }
     }
     const mainRow = this.mainSessionRow();
     if (mainRow && (mainRow.childSessions?.length ?? 0) > 0) {
       revalidating.add(mainRow.key);
-      void this.sessionData.loadChildSessions(mainRow.key);
     }
-    this.sessionData.retireStaleChildSessions(revalidating);
+    return revalidating;
   }
 
   setSessionOwnerFilter = (ownerId: string | null, involvingMe = false) =>
@@ -301,7 +340,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
       showCron: this.sessionsShowCron,
       showSystem: this.sessionsShowSystem,
       statusFilter: this.sessionsStatusFilter,
-      compareSessions: this.compareSidebarSessionRows,
+      compareSessions: createSidebarSessionRowsComparator(this.readSidebarSessionSortOptions),
       highlightCurrentSession: isSessionRouteId(this.activeRouteId),
       runtimeSampledAtByRow: this.runtimeSampledAtByRow,
       loadingChildSessionKeys: this.sessionData.loadingChildSessionKeys,
@@ -416,7 +455,8 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
       sectionOrder: this.knownSectionOrder(),
       catalogIds: catalogs.map((catalog) => catalog.id),
       collapsedSections,
-      hideEmptyGroups: this.sessionsHideEmptyGroups || this.sessionOwnerFilterActive,
+      hideEmptyGroups: this.sessionsHideEmptyGroups,
+      ownerFiltered: this.sessionOwnerFilterActive || this.sessionInvolvingMeFilterActive,
       visibleSessionLimits: roster
         ? this.rosterVisibleSessionLimits
         : this.sessionData.visibleSessionLimits,
@@ -660,7 +700,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
       selected,
       agentIds: roster?.agentIds ?? [selected],
       result: roster?.result,
-      compareSessions: this.compareSidebarSessionRows,
+      compareSessions: createSidebarSessionRowsComparator(this.readSidebarSessionSortOptions),
       knownSessionAttention: this.attention.knownSessionAttention(),
     });
     return this.applySessionOwnerFilter(projected, this.selectedAgentSessionResult()?.owners);

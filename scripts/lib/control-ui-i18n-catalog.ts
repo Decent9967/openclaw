@@ -5,6 +5,7 @@ import { buildBaseHints } from "../../src/config/schema.hints.js";
 import { configHintTranslationKey } from "../../ui/src/i18n/lib/config-hint-translation.ts";
 import { registerActivityEnglish } from "../../ui/src/i18n/locales/en-activity.ts";
 import { registerAgentsHomeEnglish } from "../../ui/src/i18n/locales/en-agents-home.ts";
+import { registerBoardWebsiteEnglish } from "../../ui/src/i18n/locales/en-board-website.ts";
 import { registerBrowserEnglish } from "../../ui/src/i18n/locales/en-browser.ts";
 import { registerDebugEnglish } from "../../ui/src/i18n/locales/en-debug.ts";
 import { registerDesktopEnglish } from "../../ui/src/i18n/locales/en-desktop.ts";
@@ -19,6 +20,7 @@ import { registerPluginManagementEnglish } from "../../ui/src/i18n/locales/en-pl
 import { registerSessionPlacementEnglish } from "../../ui/src/i18n/locales/en-session-placement.ts";
 import { registerSettingsEnglish } from "../../ui/src/i18n/locales/en-settings.ts";
 import { registerSkillLibraryEnglish } from "../../ui/src/i18n/locales/en-skill-library.ts";
+import { registerSkillWorkshopEnglish } from "../../ui/src/i18n/locales/en-skill-workshop.ts";
 import { registerTranscriptsEnglish } from "../../ui/src/i18n/locales/en-transcripts.ts";
 import { registerUpdateActionsEnglish } from "../../ui/src/i18n/locales/en-update-actions.ts";
 import { en } from "../../ui/src/i18n/locales/en.ts";
@@ -39,6 +41,7 @@ const sourceFiles = [
   "en-agents.ts",
   "en-activity.ts",
   "en-agents-home.ts",
+  "en-board-website.ts",
   "en-browser.ts",
   "en-debug.ts",
   "en-desktop.ts",
@@ -53,11 +56,19 @@ const sourceFiles = [
   "en-plugin-management.ts",
   "en-settings.ts",
   "en-skill-library.ts",
+  "en-skill-workshop.ts",
   "en-update-actions.ts",
   "en-transcripts.ts",
 ];
 
 export function loadControlUiSourceCatalog(): TranslationMap {
+  const boardWidget: TranslationMap = {};
+  for (const [key, value] of Object.entries(en.board.widget)) {
+    boardWidget[key] = value;
+    if (key === "kindWebsite") {
+      Object.assign(boardWidget, registerBoardWebsiteEnglish.catalog.board.widget);
+    }
+  }
   // Read fragment data without registering it into the shared runtime catalog.
   // en.ts's empty anchors retain source order for extracted whole subtrees.
   return mergeControlUiTranslationMaps(
@@ -65,6 +76,7 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     // Preserve partial-fragment key order while keeping shared labels eager.
     {
       ...en,
+      board: { ...en.board, widget: boardWidget },
       debug: registerDebugEnglish.catalog.debug,
       desktop: registerDesktopEnglish.catalog.desktop,
     },
@@ -81,6 +93,7 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerPluginConsentEnglish.catalog,
     registerPluginManagementEnglish.catalog,
     registerSettingsEnglish.catalog,
+    registerSkillWorkshopEnglish.catalog,
     registerUpdateActionsEnglish.catalog,
     registerTranscriptsEnglish.catalog,
     loadControlUiCoreHintCatalog(),

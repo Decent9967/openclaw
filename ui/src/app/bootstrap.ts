@@ -31,8 +31,6 @@ import { parseAgentSessionKey } from "../lib/sessions/session-key.ts";
 import { createLiveActivity } from "../pages/activity/live-activity.ts";
 import { loadChatObserverDisplayPreference } from "../pages/chat/chat-observer-display.ts";
 import { sendSessionObserverVisibility } from "../pages/chat/chat-observer.ts";
-import { resolveChatSnapshotKey } from "../pages/chat/session-snapshot-key.ts";
-import { prewarmChatSnapshot } from "../pages/chat/session-snapshot-prewarm.ts";
 import {
   isDefaultChatLanding,
   startModelSetupFirstRunRedirectAfterLocation,
@@ -45,11 +43,14 @@ import { readBootRecord } from "./boot-record.ts";
 import {
   createInitialApplicationLocationResolver,
   normalizeInitialApplicationLocation,
+  resolveBootstrapModelCatalogTarget,
   resolveInitialApplicationLocation,
+  subscribeForegroundChatBootstrap,
 } from "./bootstrap-location.ts";
 import { createApplicationNavigationPreferences } from "./bootstrap-navigation-preferences.ts";
 import { createApplicationTheme } from "./bootstrap-theme.ts";
 import {
+  prewarmBootChat,
   subscribeBootRecordPersistence,
   subscribeWarmBootConnection,
 } from "./bootstrap-warm-boot.ts";
@@ -171,6 +172,8 @@ export function bootstrapApplication(): ApplicationRuntime {
     {
       persistDefaultConnectionSettings: documentMode === null,
       resourceBasePath,
+      getModelCatalogTarget: (gatewayUrl) =>
+        resolveBootstrapModelCatalogTarget(history.location(), basePath, gatewayUrl),
       ...(!hasPendingGateway && startup.pendingBootstrapProfile
         ? { bootstrapProfile: startup.pendingBootstrapProfile }
         : {}),
@@ -179,6 +182,7 @@ export function bootstrapApplication(): ApplicationRuntime {
   );
   const liveActivity = createLiveActivity(gateway);
   const connectionBootstrap = createConnectionBootstrapCoordinator();
+  const router = createApplicationRouter();
   const bootRecord = readBootRecord(gatewayCredentialScope(settings.gatewayUrl), (method) => {
     if (startup.pendingBootstrapToken || startup.password) {
       return null;
@@ -191,13 +195,8 @@ export function bootstrapApplication(): ApplicationRuntime {
         : loadCurrentDeviceAuthToken(settings.gatewayUrl);
   });
   const warmBoot = bootRecord !== null && startsApplicationRouter && !hasPendingGateway;
-  if (warmBoot && parseAgentSessionKey(settings.sessionKey)) {
-    prewarmChatSnapshot(
-      resolveChatSnapshotKey(
-        { agentsList: bootRecord.agents, hello: null, assistantAgentId: null },
-        { sessionKey: settings.sessionKey },
-      ),
-    );
+  if (warmBoot) {
+    prewarmBootChat(bootRecord, settings.sessionKey);
   }
   const stopWarmBootConnection = subscribeWarmBootConnection(
     gateway,
@@ -269,6 +268,16 @@ export function bootstrapApplication(): ApplicationRuntime {
     },
   );
   const channels = createChannelCapability(gateway);
+  const stopForegroundBootstrap = subscribeForegroundChatBootstrap({
+    router,
+    gateway,
+    agents,
+    agentSelection,
+    connectionBootstrap,
+    initialChatRoute:
+      startsApplicationRouter &&
+      sessionRefFromPath(applicationLocation.pathname, basePath)?.namespace === "chat",
+  });
   const scopeUpgrade = createScopeUpgradeCapability(gateway);
   const config = createApplicationConfigCapability({
     resourceBasePath,
@@ -278,7 +287,10 @@ export function bootstrapApplication(): ApplicationRuntime {
       password: gateway.connection.password,
     }),
   });
-  const sessions = createSessionCapability(gateway, agentSelection, { bootRecord });
+  const sessions = createSessionCapability(gateway, agentSelection, {
+    bootRecord,
+    connectionBootstrap,
+  });
   const stopBootRecordPersistence = subscribeBootRecordPersistence({ gateway, agents, sessions });
   const runtimeConfig = createRuntimeConfigCapability(gateway);
   const overlays = createApplicationOverlays(gateway, {
@@ -337,7 +349,6 @@ export function bootstrapApplication(): ApplicationRuntime {
     chatSubmissions,
   });
   const chatAttachmentHandoff = createChatAttachmentHandoff();
-  const router = createApplicationRouter();
   let routerStarted = false;
   // Pre-start navigations are invisible to history; retain the latest request so
   // router.start() cannot resolve the stale browser URL over the user's route.
@@ -360,10 +371,6 @@ export function bootstrapApplication(): ApplicationRuntime {
   );
   const initialConnectionRevision = gateway.connectionRevision;
   const stopPostConnect = gateway.subscribe((snapshot) => {
-    connectionBootstrap.synchronize({
-      client: snapshot.client,
-      connected: snapshot.phase === "connected",
-    });
     if (snapshot.phase === "connected") {
       browserBootstrapAttempted = true;
     }
@@ -658,6 +665,7 @@ export function bootstrapApplication(): ApplicationRuntime {
       stopWarmBootConnection();
       stopBootRecordPersistence();
       stopPostConnect();
+      stopForegroundBootstrap();
       connectionBootstrap.reset();
       agents.dispose();
       agentSelection.dispose();

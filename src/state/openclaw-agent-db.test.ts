@@ -676,6 +676,7 @@ function launchAgentSchemaOpener(params: {
 }) {
   const agentModuleUrl = new URL("./openclaw-agent-db.ts", import.meta.url).href;
   const stateModuleUrl = new URL("./openclaw-state-db.ts", import.meta.url).href;
+  const sqliteModuleUrl = new URL("../infra/node-sqlite.ts", import.meta.url).href;
   const child = spawn(
     process.execPath,
     [
@@ -684,7 +685,7 @@ function launchAgentSchemaOpener(params: {
       "--input-type=module",
       "-e",
       `
-        import { DatabaseSync } from "node:sqlite";
+        import { openNodeSqliteDatabase } from ${JSON.stringify(sqliteModuleUrl)};
         import {
           ensureOpenClawAgentDatabaseSchema,
         } from ${JSON.stringify(agentModuleUrl)};
@@ -692,7 +693,7 @@ function launchAgentSchemaOpener(params: {
           closeOpenClawStateDatabaseForTest,
         } from ${JSON.stringify(stateModuleUrl)};
 
-        const db = new DatabaseSync(process.env.OPENCLAW_AGENT_DB_RACE_PATH);
+        const db = openNodeSqliteDatabase(process.env.OPENCLAW_AGENT_DB_RACE_PATH);
         db.exec("PRAGMA busy_timeout = 5000;");
         const observedDb = new Proxy(db, {
           get(target, property) {
@@ -5028,7 +5029,7 @@ describe("openclaw agent database", () => {
     );
   });
 
-  it("rechecks integrity after a validated handle is physically reopened", () => {
+  it("retains integrity verification until the runtime lifecycle resets", () => {
     const stateDir = createTempStateDir();
     const env = { OPENCLAW_STATE_DIR: stateDir };
     const databasePath = openOpenClawAgentDatabase({ agentId: "worker-1", env }).path;
@@ -5036,6 +5037,8 @@ describe("openclaw agent database", () => {
     closeOpenClawStateDatabaseForTest();
     createUnsafeIndexDrift(databasePath);
 
+    expect(openOpenClawAgentDatabase({ agentId: "worker-1", env }).db.isOpen).toBe(true);
+    closeOpenClawAgentDatabasesForTest();
     expect(() => openOpenClawAgentDatabase({ agentId: "worker-1", env })).toThrow(
       /integrity_check failed.*missing from index unsafe_index_records_value/iu,
     );
@@ -5309,7 +5312,7 @@ describe("openclaw agent database", () => {
     {
       kind: "malformed ownership metadata",
       schema: "CREATE TABLE schema_meta (meta_key TEXT);",
-      expectedError: /no such column: role/,
+      expectedError: /no such column: (?:role\b|"role")/,
     },
   ])(
     "preserves the refusal for a populated v0 database with $kind",

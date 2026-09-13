@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { sanitizeForLog } from "../../../../packages/terminal-core/src/ansi.js";
 import { isFastTestRuntimeEnv } from "../../../infra/env.js";
 import { hasRetainedPluginRuntimeCloseError } from "../../../plugins/runtime-close-error.js";
@@ -39,6 +40,23 @@ type SwarmGroupLane = {
   pumpScheduled: boolean;
 };
 
+function bindSwarmLaunchWork<Args extends unknown[], Result>(
+  run: (...args: Args) => Result | Promise<Result>,
+): (...args: Args) => Promise<Result> {
+  // Keep activation identity without re-entering its retired request's work scope.
+  return AsyncLocalStorage.bind(async (...args: Args) => {
+    const work = new AsyncWorkScope();
+    try {
+      return await work.track(() => run(...args));
+    } finally {
+      await AsyncWorkScope.runWhenAllIdle(
+        () => [work],
+        () => work.run(() => work.drain()),
+      );
+    }
+  });
+}
+
 const lanes = new Map<string, SwarmGroupLane>();
 const pendingRemovals = new Set<QueuedSwarmRun>();
 const runLocations = new Map<
@@ -75,15 +93,7 @@ function finalizeRemovedRun(
     pendingRemovals.add(item);
     const cleanup = async () => {
       const [launch] = await Promise.allSettled([item.pendingLaunch]);
-      const work = new AsyncWorkScope();
-      try {
-        await work.track(() => onRemoved?.(reason));
-      } finally {
-        await AsyncWorkScope.runWhenAllIdle(
-          () => [work],
-          () => work.run(() => work.drain()),
-        );
-      }
+      await onRemoved?.(reason);
       if (launch.status === "rejected") {
         throw launch.reason;
       }
@@ -260,10 +270,12 @@ export function activateSwarmRun(
     throw new Error(`swarm scheduler reservation missing for run ${params.runId}`);
   }
   const { lane, item } = location;
+  const onRemoved = params.onRemoved;
+  // Capacity can be released by another run or Stop; callbacks keep their activation owner.
   item.launch = {
-    start: params.start,
-    onStartFailure: params.onStartFailure,
-    onRemoved: params.onRemoved,
+    start: bindSwarmLaunchWork(params.start),
+    onStartFailure: bindSwarmLaunchWork(params.onStartFailure),
+    onRemoved: onRemoved && bindSwarmLaunchWork(onRemoved),
     lifecycleOwner: params.lifecycleOwner,
   };
   publishCapacityChange(item);
@@ -290,9 +302,7 @@ export function releaseSwarmRun(runId: string): boolean {
     return false;
   }
   const previouslyFull = location.lane.active.size >= location.lane.limit;
-  if (!location.lane.active.delete(runId)) {
-    return false;
-  }
+  location.lane.active.delete(runId);
   runLocations.delete(runId);
   publishLaneCapacityChange(location.lane, previouslyFull);
   pumpLane(location.lane);
@@ -306,9 +316,6 @@ export function removeQueuedSwarmRun(runId: string): boolean {
     return false;
   }
   const index = location.lane.queue.indexOf(location.item);
-  if (index < 0) {
-    return false;
-  }
   location.lane.queue.splice(index, 1);
   runLocations.delete(runId);
   void finalizeRemovedRun(location.item);

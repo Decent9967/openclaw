@@ -4,10 +4,30 @@ const currentModuleUrl = import.meta.url;
 export const SQLITE_READONLY_CHILD_ARG = "--openclaw-sqlite-readonly-child";
 
 export const runtimeProcessEntrypoints = {
+  imageProcessor: {
+    currentModuleUrl,
+    sourceWorkerName: "../media/image-processor.worker",
+    distWorkerPath: "media/image-processor.worker.js",
+  },
+  gitOperations: {
+    currentModuleUrl,
+    sourceWorkerName: "git-operation.worker",
+    distWorkerPath: "infra/git-operation.worker.js",
+  },
+  sharedStateStore: {
+    currentModuleUrl,
+    sourceWorkerName: "../state/openclaw-state.worker",
+    distWorkerPath: "state/openclaw-state.worker.js",
+  },
   sqliteStore: {
     currentModuleUrl,
     sourceWorkerName: "sqlite-store.worker",
     distWorkerPath: "infra/sqlite-store.worker.js",
+  },
+  agentSchemaInspection: {
+    currentModuleUrl,
+    sourceWorkerName: "../state/openclaw-agent-schema-inspection.worker",
+    distWorkerPath: "state/openclaw-agent-schema-inspection.worker.js",
   },
   stateMigrationSnapshot: {
     currentModuleUrl,

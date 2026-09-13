@@ -7,6 +7,7 @@ import { TELEMETRY_FIELD_LABELS } from "./zod-schema.telemetry.js";
 
 export const FIELD_LABELS: Record<string, string> = {
   worktreeRoot: "Worktree Root",
+  worktreeAcceleration: "Worktree Acceleration",
   "channels.discord.activities": "Discord Activities",
   "channels.discord.activities.clientSecret": "Discord Activities Client Secret",
   "channels.discord.activities.applicationId": "Discord Activities Application ID",
@@ -615,6 +616,10 @@ export const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.models.*.codeMode": "Code Mode",
   "agents.defaults.model.primary": "Primary Model",
   "agents.defaults.model.fallbacks": "Model Fallbacks",
+  "agents.defaults.embeddedAgent.cyberFailover": "Cyber Policy Failover",
+  "agents.defaults.embeddedAgent.cyberFailover.mode": "Cyber Policy Failover Mode",
+  "agents.defaults.embeddedAgent.cyberFailover.model": "Cyber Policy Failover Model",
+  "agents.defaults.embeddedAgent.cyberFailover.cooloffMs": "Cyber Policy Failover Cooloff",
   "agents.defaults.utilityModel": "Utility Model",
   "agents.entries.*.utilityModel": "Agent Utility Model",
   "agents.defaults.imageModel.primary": "Image Model",

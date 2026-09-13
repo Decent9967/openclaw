@@ -652,21 +652,6 @@ function createCronPromptExecutor(
             config: params.cfgWithAgentDefaults,
             agentId: params.agentId,
           });
-          const authProfileId = allowCliAuthProfileForwarding
-            ? resolveCliExecutionAuthProfileId({
-                cliExecutionProvider: executionProvider,
-                authProfileProvider: providerOverride,
-                config: params.cfgWithAgentDefaults,
-                agentDir: params.agentDir,
-                selected: params.liveSelection.authProfileId
-                  ? {
-                      authProfileId: params.liveSelection.authProfileId,
-                      authProfileIdSource:
-                        params.liveSelection.authProfileIdSource === "user" ? "user" : "auto",
-                    }
-                  : undefined,
-              })
-            : undefined;
           // Cron intentionally reuses its durable session id as the run id; turn
           // claims stay unique via per-claim ids and the worker gate handles this
           // via credential rotation (see worker-environments/service.ts fences).
@@ -681,6 +666,22 @@ function createCronPromptExecutor(
               const cliSessionBinding = params.cronSession.isNewSession
                 ? undefined
                 : await getCliSessionBinding(params.cronSession.sessionEntry, executionProvider);
+              const authProfileId = allowCliAuthProfileForwarding
+                ? resolveCliExecutionAuthProfileId({
+                    cliExecutionProvider: executionProvider,
+                    authProfileProvider: providerOverride,
+                    config: params.cfgWithAgentDefaults,
+                    agentDir: params.agentDir,
+                    sessionBinding: cliSessionBinding,
+                    selected: params.liveSelection.authProfileId
+                      ? {
+                          authProfileId: params.liveSelection.authProfileId,
+                          authProfileIdSource:
+                            params.liveSelection.authProfileIdSource === "user" ? "user" : "auto",
+                        }
+                      : undefined,
+                  })
+                : undefined;
               const guardedCliSessionBinding =
                 cliSessionBinding && hasCliSessionReuseMetadata(cliSessionBinding)
                   ? cliSessionBinding
@@ -835,7 +836,7 @@ function createCronPromptExecutor(
             : undefined,
           // Scheduled run: keep bursty cron overloaded/rate_limit local, while
           // still sharing real credential/account failures across auth profiles.
-          authProfileFailurePolicy: "local_transient",
+          authProfileFailurePolicy: runOptions.authProfileFailurePolicy ?? "local_transient",
           // Fallback selection is turn-local. Revalidate the stored or
           // requested level without rewriting the durable preference.
           thinkLevel: candidateThinkLevel,

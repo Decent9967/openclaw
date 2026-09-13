@@ -8,16 +8,18 @@ import { invalidateModelCatalogCache } from "../model-catalog-cache.ts";
 export type ChatMetadataResult = CommandsListResult;
 
 export type ChatMetadataUpdate =
-  | { type: "invalidated" }
+  | { type: "invalidated"; refreshSessionFacts: boolean }
   | { type: "loading" }
   | { type: "result"; result: ChatMetadataResult }
   | { type: "error"; error: unknown };
+export type ChatMetadataWriter = {
+  pending?: Promise<ChatMetadataResult>;
+  revalidating: boolean;
+};
 export type ChatMetadataEntry = {
   scope: ChatMetadataParams;
   result?: ChatMetadataResult;
-  loadPending?: Promise<ChatMetadataResult>;
-  revalidationPending?: Promise<ChatMetadataResult>;
-  writer?: object;
+  writer?: ChatMetadataWriter;
   listeners: Set<(update: ChatMetadataUpdate) => void>;
   release: () => void;
 };
@@ -59,12 +61,14 @@ export function invalidateChatMetadataStore(
   // Retire every affected writer before subscribers can synchronously start replacements.
   for (const entry of invalidated) {
     entry.result = undefined;
-    entry.loadPending = undefined;
-    entry.revalidationPending = undefined;
     entry.writer = undefined;
   }
   for (const entry of invalidated) {
-    notifyChatMetadataListeners(entry, { type: "invalidated" });
+    notifyChatMetadataListeners(entry, {
+      type: "invalidated",
+      // Session mutations own roster reconciliation; global catalog changes also change session facts.
+      refreshSessionFacts: !scope?.sessionKey,
+    });
     entry.release();
   }
 }

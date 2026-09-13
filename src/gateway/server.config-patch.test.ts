@@ -1,5 +1,6 @@
 // Config patch tests cover control-UI config edits, secret-ref writes, auth
 // profile persistence, and rate limiting through a real Gateway owner.
+import fsNode from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ import { resolveDefaultAgentDir } from "../agents/agent-scope.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { REDACTED_SENTINEL } from "../config/redact-snapshot.js";
 import { resetGatewayRestartStateForInProcessRestart } from "../infra/restart.js";
-import { resetLogger, setLoggerOverride } from "../logging/logger.js";
+import { applyLoggingConfig, resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import {
   activateSecretsRuntimeSnapshot,
@@ -90,7 +91,7 @@ function requireConfigObject(value: unknown, label: string): Record<string, unkn
   return value as Record<string, unknown>;
 }
 
-async function startConfigRpcGateway() {
+async function startConfigRpcGateway(configRelativePath?: string) {
   state = await createOpenClawTestState({
     label: "config-rpc",
     env: {
@@ -108,7 +109,14 @@ async function startConfigRpcGateway() {
     },
   });
   setLoggerOverride({ level: "silent", consoleLevel: "silent" });
-  await state.writeConfig({ agents: { entries: { main: {} } } });
+  const config = { agents: { entries: { main: {} } } };
+  if (configRelativePath) {
+    const configPath = state.statePath(configRelativePath);
+    await writeJsonFile(configPath, config);
+    process.env.OPENCLAW_CONFIG_PATH = configPath;
+  } else {
+    await state.writeConfig(config);
+  }
   hotReloadRecovery.mockClear();
   const port = await getFreePort();
   server = await startGatewayServerCore(port, {
@@ -274,8 +282,8 @@ async function writeUnresolvedAuthProfileTokenRef(missingEnvVar: string) {
   );
 }
 
-function installConfigWriteGatewayHooks() {
-  beforeEach(startConfigRpcGateway);
+function installConfigWriteGatewayHooks(configRelativePath?: string) {
+  beforeEach(() => startConfigRpcGateway(configRelativePath));
   beforeEach(() => {
     rateLimitEpochMs += 60_000;
     vi.spyOn(Date, "now").mockReturnValue(rateLimitEpochMs);
@@ -521,7 +529,215 @@ describe("gateway config methods", () => {
     },
   );
 
-  it("config.set pairs the canonical config and revision while another writer waits", async () => {
+  it.each([
+    ...(["EPERM", "EEXIST"] as const).flatMap((code) =>
+      (["unchanged", "changed"] as const).flatMap((includedContent) =>
+        (["retained", "deleted"] as const).map((rootState) => ({
+          code,
+          includedContent,
+          rootState,
+        })),
+      ),
+    ),
+    ...(["EPERM", "EEXIST"] as const).map((code) => ({
+      code,
+      includedContent: "changed" as const,
+      rootState: "removed-by-writer" as const,
+    })),
+  ])(
+    "config.set handles $code copy fallback with $includedContent included content and $rootState root",
+    async ({ code, includedContent, rootState }) => {
+      const original = await getCurrentConfigObject();
+      const includePath = path.join(path.dirname(original.path), "logging.json");
+      await writeJsonFile(includePath, { level: "info" });
+      await writeJsonFile(original.path, {
+        ...original.config,
+        logging: { $include: "logging.json" },
+        gateway: { reload: { mode: "off" } },
+      });
+      invalidateConfigGetResponseCache();
+      const draft = await getCurrentConfigObject();
+      const rootBefore = await fs.readFile(original.path, "utf8");
+      const rename = fsNode.renameSync;
+      let renameDenied = false;
+      vi.spyOn(fsNode, "renameSync").mockImplementation((source, destination) => {
+        if (destination !== original.path) {
+          return rename(source, destination);
+        }
+        renameDenied = true;
+        if (rootState === "deleted") {
+          fsNode.unlinkSync(original.path);
+        }
+        if (includedContent === "changed" && rootState !== "removed-by-writer") {
+          fsNode.writeFileSync(includePath, JSON.stringify({ level: "debug" }));
+        }
+        throw Object.assign(new Error("rename denied"), { code });
+      });
+      if (rootState === "removed-by-writer") {
+        const remove = fsNode.rmSync;
+        vi.spyOn(fsNode, "rmSync").mockImplementation((filePath, options) => {
+          remove(filePath, options);
+          if (filePath === original.path) {
+            fsNode.writeFileSync(includePath, JSON.stringify({ level: "debug" }));
+          }
+        });
+      }
+
+      const result = await rpcReq(requireClient(), "config.set", {
+        raw: JSON.stringify({ ...draft.config, ui: { prefs: { locale: "fr" } } }),
+        baseHash: draft.hash,
+      });
+
+      expect(renameDenied).toBe(true);
+      if (includedContent === "changed" || rootState === "deleted") {
+        expect(result.ok).toBe(false);
+        expect(result.error?.code).toBe(
+          rootState === "removed-by-writer" ? "UNAVAILABLE" : "INVALID_REQUEST",
+        );
+        expect(result.error?.message).toContain(
+          includedContent === "changed" ? "included config" : "config changed since last load",
+        );
+        if (rootState === "deleted") {
+          await expect(fs.stat(original.path)).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          expect(await fs.readFile(original.path, "utf8")).toBe(rootBefore);
+        }
+        if (rootState === "removed-by-writer") {
+          expect(result.error?.message).toContain("The config write was rolled back.");
+          expect(result.error?.message).toContain(
+            `Inspect recovery backups at ${original.path}.bak.`,
+          );
+          expect(await fs.readFile(`${original.path}.bak`, "utf8")).toBe(rootBefore);
+        }
+        expect(JSON.parse(await fs.readFile(includePath, "utf8"))).toEqual({
+          level: includedContent === "changed" ? "debug" : "info",
+        });
+      } else {
+        expect(result.ok, result.error?.message).toBe(true);
+        invalidateConfigGetResponseCache();
+        const committed = await getCurrentConfigObject();
+        expect(result.payload).toMatchObject({ config: committed.config, hash: committed.hash });
+        expect(committed.config).toMatchObject({
+          logging: { level: "info" },
+          ui: { prefs: { locale: "fr" } },
+        });
+        expect(JSON.parse(await fs.readFile(original.path, "utf8"))).toMatchObject({
+          logging: { $include: "logging.json" },
+        });
+        expect(JSON.parse(await fs.readFile(includePath, "utf8"))).toEqual({ level: "info" });
+      }
+    },
+  );
+
+  it.each(["content", "target", "missing"] as const)(
+    "config.set rejects include %s changes during runtime preflight before committing",
+    async (change) => {
+      const configFactory = await import("../config/io.factory.js");
+      const original = await getCurrentConfigObject();
+      const directory = path.dirname(original.path);
+      const first = path.join(directory, "logging-first");
+      const second = path.join(directory, "logging-second");
+      const current = path.join(directory, "logging-current");
+      await fs.mkdir(first);
+      await fs.mkdir(second);
+      await writeJsonFile(path.join(first, "logging.json"), { level: "info" });
+      await writeJsonFile(path.join(second, "logging.json"), { level: "info" });
+      await fs.symlink(first, current, "junction");
+      await writeJsonFile(original.path, {
+        ...original.config,
+        logging: { $include: "logging-current/logging.json" },
+        gateway: { reload: { mode: "off" } },
+      });
+      invalidateConfigGetResponseCache();
+      const draft = await getCurrentConfigObject();
+      const rootBefore = await fs.readFile(original.path, "utf8");
+      const createIO = configFactory.createConfigIO;
+      vi.spyOn(configFactory, "createConfigIO").mockImplementation((options) => {
+        const io = createIO(options);
+        return {
+          ...io,
+          writeConfigFile: (config, writeOptions) =>
+            io.writeConfigFile(config, {
+              ...writeOptions,
+              preCommitRuntimePreflight: async (source) => {
+                await writeOptions?.preCommitRuntimePreflight?.(source);
+                if (change === "content") {
+                  await writeJsonFile(path.join(first, "logging.json"), { level: "debug" });
+                } else if (change === "missing") {
+                  await fs.unlink(path.join(first, "logging.json"));
+                } else {
+                  await fs.unlink(current);
+                  await fs.symlink(second, current, "junction");
+                }
+              },
+            }),
+        };
+      });
+
+      const result = await rpcReq(requireClient(), "config.set", {
+        raw: JSON.stringify({ ...draft.config, ui: { prefs: { locale: "fr" } } }),
+        baseHash: draft.hash,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toContain("included config");
+      expect(await fs.readFile(original.path, "utf8")).toBe(rootBefore);
+      if (change === "missing") {
+        await expect(fs.readFile(path.join(current, "logging.json"), "utf8")).rejects.toMatchObject(
+          {
+            code: "ENOENT",
+          },
+        );
+      } else {
+        expect(JSON.parse(await fs.readFile(path.join(current, "logging.json"), "utf8"))).toEqual({
+          level: change === "content" ? "debug" : "info",
+        });
+      }
+      expect(await fs.realpath(current)).toBe(
+        await fs.realpath(change === "target" ? second : first),
+      );
+    },
+  );
+
+  it("config.set acknowledges an include config when an external edit invalidates the reread", async () => {
+    const configFactory = await import("../config/io.factory.js");
+    const original = await getCurrentConfigObject();
+    await writeJsonFile(path.join(path.dirname(original.path), "logging.json"), { level: "info" });
+    await writeJsonFile(original.path, {
+      ...original.config,
+      logging: { $include: "logging.json" },
+      gateway: { reload: { mode: "off" } },
+    });
+    invalidateConfigGetResponseCache();
+    const draft = await getCurrentConfigObject();
+    let committed: Awaited<ReturnType<typeof getCurrentConfigObject>> | undefined;
+    const createIO = configFactory.createConfigIO;
+    vi.spyOn(configFactory, "createConfigIO").mockImplementation((options) => {
+      const io = createIO(options);
+      return {
+        ...io,
+        writeConfigFile: async (...args) => {
+          const written = await io.writeConfigFile(...args);
+          if (io.configPath === original.path) {
+            invalidateConfigGetResponseCache();
+            committed = await getCurrentConfigObject();
+            await fs.writeFile(original.path, "{ external editor incomplete\n");
+          }
+          return written;
+        },
+      };
+    });
+    const result = await rpcReq(requireClient(), "config.set", {
+      raw: JSON.stringify({ ...draft.config, ui: { prefs: { locale: "fr" } } }),
+      baseHash: draft.hash,
+    });
+    expect(result.ok, result.error?.message).toBe(true);
+    expect(committed?.config).toMatchObject({ logging: { level: "info" } });
+    expect(result.payload).toMatchObject({ config: committed?.config, hash: committed?.hash });
+    expect(await fs.readFile(original.path, "utf8")).toBe("{ external editor incomplete\n");
+  });
+
+  it("config.set pairs the committed config and revision while another writer waits", async () => {
     const configFactory = await import("../config/io.factory.js");
     const { KeyedAsyncQueue } = await import("../plugin-sdk/keyed-async-queue.js");
     const original = await getCurrentConfigObject();
@@ -537,7 +753,6 @@ describe("gateway config methods", () => {
     const canonicalRead = createDeferredCore();
     const releaseCanonicalRead = createDeferredCore();
     const competingLock = createDeferredCore();
-    let rootWritten = false;
     let pauseCanonicalRead = true;
     let observeCompetingLock = false;
     let competingWriterStarted = false;
@@ -545,7 +760,7 @@ describe("gateway config methods", () => {
     // oxlint-disable-next-line typescript/unbound-method -- The observer calls the original with its queue receiver.
     const enqueue = KeyedAsyncQueue.prototype.enqueue;
 
-    // Retain real IO and locks; pause only the post-write receipt read so the
+    // Retain real IO and locks; pause only the committed writer return so the
     // competing authenticated request has a deterministic contention window.
     const ioObservation = vi
       .spyOn(configFactory, "createConfigIO")
@@ -555,18 +770,12 @@ describe("gateway config methods", () => {
           ...io,
           writeConfigFile: async (...args) => {
             const written = await io.writeConfigFile(...args);
-            if (io.configPath === original.path) {
-              rootWritten = true;
-            }
-            return written;
-          },
-          readConfigFileSnapshotForWrite: async (...args) => {
-            if (io.configPath === original.path && rootWritten && pauseCanonicalRead) {
+            if (io.configPath === original.path && pauseCanonicalRead) {
               pauseCanonicalRead = false;
               canonicalRead.resolve();
               await releaseCanonicalRead.promise;
             }
-            return await io.readConfigFileSnapshotForWrite(...args);
+            return written;
           },
         };
       });
@@ -623,6 +832,8 @@ describe("gateway config methods", () => {
       // distinguishable from both the submitted config and the writer result.
       const written = JSON.parse(await fs.readFile(original.path, "utf8"));
       expect(written.logging.level).toBe("debug");
+      invalidateConfigGetResponseCache();
+      const committed = await getCurrentConfigObject();
       await writeJsonFile(original.path, { ...written, ui: { prefs: { locale: "fr" } } });
       invalidateConfigGetResponseCache();
       const canonical = await getCurrentConfigObject();
@@ -667,8 +878,8 @@ describe("gateway config methods", () => {
       expect(secondResult.ok, secondResult.error?.message).toBe(true);
       expect(competingWriterStarted).toBe(true);
       expect({ config: firstResult.payload?.config, hash: firstResult.payload?.hash }).toEqual({
-        config: canonical.config,
-        hash: canonical.hash,
+        config: committed.config,
+        hash: committed.hash,
       });
       const after = await getCurrentConfigObject();
       expect({ config: secondResult.payload?.config, hash: secondResult.payload?.hash }).toEqual({
@@ -1904,9 +2115,107 @@ describe("gateway config.apply", () => {
   });
 });
 
+describe("gateway config recovery errors", () => {
+  installConfigWriteGatewayHooks(
+    path.join(
+      "long-config-location-".repeat(4),
+      "long-config-location-".repeat(4),
+      "long-config-location-".repeat(4),
+      "openclaw.json",
+    ),
+  );
+
+  it.each(["config.set", "config.patch", "config.apply"])(
+    "%s preserves the failed-recovery outcome and backup location with built-in and custom redaction",
+    async (method) => {
+      const original = await getCurrentConfigObject();
+      expect(original.path.length).toBeGreaterThan(240);
+      const includePath = path.join(path.dirname(original.path), "logging.json");
+      await writeJsonFile(includePath, { level: "info" });
+      await writeJsonFile(original.path, {
+        ...original.config,
+        logging: { $include: "logging.json" },
+        gateway: { reload: { mode: "off" } },
+      });
+      invalidateConfigGetResponseCache();
+      const draft = await getCurrentConfigObject();
+      const rootBefore = await fs.readFile(original.path, "utf8");
+      const credential = `synthetic-credential-${"x".repeat(32)}`;
+      const customDetail = "project-private-marker";
+      applyLoggingConfig({
+        level: "silent",
+        consoleLevel: "silent",
+        redactPatterns: [`/${customDetail}/g`],
+      });
+      const rename = fsNode.renameSync;
+      vi.spyOn(fsNode, "renameSync").mockImplementation((source, destination) => {
+        if (destination !== original.path) {
+          return rename(source, destination);
+        }
+        throw Object.assign(new Error("rename denied"), { code: "EPERM" });
+      });
+      let rootRemoved = false;
+      const remove = fsNode.rmSync;
+      vi.spyOn(fsNode, "rmSync").mockImplementation((filePath, options) => {
+        remove(filePath, options);
+        if (filePath === original.path) {
+          rootRemoved = true;
+          fsNode.writeFileSync(includePath, JSON.stringify({ level: "debug" }));
+        }
+      });
+      let recoveryStageDenied = false;
+      const open = fsNode.openSync;
+      vi.spyOn(fsNode, "openSync").mockImplementation((filePath, flags, mode) => {
+        if (
+          rootRemoved &&
+          typeof filePath === "string" &&
+          path.dirname(filePath) === path.dirname(original.path) &&
+          path.basename(filePath).startsWith(".fs-safe-replace.") &&
+          filePath.endsWith(".tmp")
+        ) {
+          recoveryStageDenied = true;
+          throw Object.assign(
+            new Error(
+              `recovery staging has no space; Authorization: Bearer ${credential}; ${customDetail}`,
+            ),
+            { code: "ENOSPC" },
+          );
+        }
+        return open(filePath, flags, mode);
+      });
+
+      const patch = { ui: { prefs: { locale: "fr" } } };
+      const result = await rpcReq(requireClient(), method, {
+        raw: JSON.stringify(method === "config.patch" ? patch : { ...draft.config, ...patch }),
+        baseHash: draft.hash,
+      });
+
+      expect(recoveryStageDenied).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatchObject({
+        code: "UNAVAILABLE",
+        details: {
+          publication: "partial",
+          rollbackStatus: "unknown",
+          configPath: original.path,
+          recoveryBackupPath: `${original.path}.bak`,
+        },
+      });
+      expect(result.error?.message).toContain("recovery staging has no space");
+      expect(result.error?.message).not.toContain(credential);
+      expect(result.error?.message).not.toContain(customDetail);
+      expect(result.error?.message).toContain("Rollback could not be confirmed.");
+      expect(result.error?.message).toContain(`Inspect recovery backups at ${original.path}.bak.`);
+      await expect(fs.stat(original.path)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await fs.readFile(`${original.path}.bak`, "utf8")).toBe(rootBefore);
+      expect(JSON.parse(await fs.readFile(includePath, "utf8"))).toEqual({ level: "debug" });
+    },
+  );
+});
+
 describe("gateway config schema lookup", () => {
   // Schema lookups leave config and runtime owners unchanged between cases.
-  beforeAll(startConfigRpcGateway);
+  beforeAll(() => startConfigRpcGateway());
   afterAll(stopConfigRpcGateway);
 
   it("returns a path-scoped config schema lookup", async () => {

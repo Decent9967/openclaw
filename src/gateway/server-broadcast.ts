@@ -362,8 +362,12 @@ export function createGatewayBroadcaster(params: {
       event === "presence" ? (payload as { presence: SystemPresence[] }) : undefined;
     let projectPresence: ((client: GatewayWsClient) => SystemPresence[]) | undefined;
     let outboundEventLogged = false;
+    let lastFrameSequence = 0;
+    let lastFrame: string | undefined;
     let frameBase: FrameBase | undefined = retained?.base;
     let frameFields: Omit<FrameBase, "payloadFragment"> | undefined;
+    // Private coalescers preserve inputs; identical pending histories can share this merge.
+    let mergedFrames: Map<unknown, { payload: unknown; base: FrameBase }> | undefined;
     const frameBaseFor = (value: unknown): FrameBase => {
       frameFields ??= {
         eventJSON: JSON.stringify(event),
@@ -511,8 +515,17 @@ export function createGatewayBroadcaster(params: {
           previous = undefined;
         }
         try {
-          const nextPayload = previous ? live.coalesce.merge(previous.payload, payload) : payload;
-          const base = previous ? frameBaseFor(nextPayload) : getFrameBase();
+          const cached = previous ? mergedFrames?.get(previous.payload) : undefined;
+          const nextPayload = cached
+            ? cached.payload
+            : previous
+              ? live.coalesce.merge(previous.payload, payload)
+              : payload;
+          const base =
+            cached?.base ?? (nextPayload === payload ? getFrameBase() : frameBaseFor(nextPayload));
+          if (previous && !cached && nextPayload !== payload) {
+            (mergedFrames ??= new Map()).set(previous.payload, { payload: nextPayload, base });
+          }
           // Reserve the complete frame and maximum sequence width once per serialized base;
           // unrelated sends can advance the sequence while this entry is waiting to drain.
           const bytes = (base.reservedBytes ??=
@@ -589,7 +602,15 @@ export function createGatewayBroadcaster(params: {
             presence: projectPresence(c),
           });
         }
-        frame = frameWithSequence(base, nextSeq, payloadFragment);
+        if (!presencePayload && lastFrame !== undefined && lastFrameSequence === nextSeq) {
+          frame = lastFrame;
+        } else {
+          frame = frameWithSequence(base, nextSeq, payloadFragment);
+          if (!presencePayload) {
+            lastFrameSequence = nextSeq;
+            lastFrame = frame;
+          }
+        }
       } catch (err) {
         log.error(`broadcast serialization failed for event ${event}: ${formatErrorMessage(err)}`);
         return;
