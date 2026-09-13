@@ -98,6 +98,21 @@ async function presentationOverride(page: Page) {
 
 suite.define(() => {
   it.each(["split", "expanded"] as const)(
+    "opens the shared %s default through the real keyboard shortcut",
+    async (presentation) => {
+      await suite.withPage({ viewport: { width: 1440, height: 1000 } }, async ({ page }) => {
+        await openDashboard(page, presentation, { face: "chat" });
+        await page.keyboard.press("Control+Shift+Alt+G");
+        await page.locator("openclaw-board-view").waitFor({ state: "visible" });
+        await page.locator(".sidebar-region__primary").waitFor({
+          state: presentation === "expanded" ? "hidden" : "visible",
+        });
+        expect(await presentationOverride(page)).toBeNull();
+      });
+    },
+  );
+
+  it.each(["split", "expanded"] as const)(
     "keeps the agent-requested %s view through actual face-change navigation",
     async (requested) => {
       const shared = requested === "expanded" ? "split" : "expanded";

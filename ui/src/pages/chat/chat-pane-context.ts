@@ -318,9 +318,12 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       }));
     const sourceChanged = connectionLifecycle.transition(snapshot);
     const clientChanged = this.connectedClient !== snapshot.client;
+    const layoutClientChanged = this.sidebarLayoutSource
+      ? snapshot.client !== null && this.sidebarLayoutSource.client !== snapshot.client
+      : state.client !== snapshot.client;
     const layoutSourceChanged =
       !this.sidebarLayoutSource ||
-      (snapshot.client !== null && this.sidebarLayoutSource.client !== snapshot.client) ||
+      layoutClientChanged ||
       (snapshot.phase === "connected" && !this.sidebarLayoutSource.ready);
     if (clientChanged) {
       this.replaceStagedAttachmentGatewayOwner(snapshot.client);
@@ -445,9 +448,9 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
         state.sidebarLayout = this.restorePaneSidebarLayout(
           normalizeSidebarLayout(persistedLayout),
         );
-      } else if (layoutSourceChanged) {
+      } else if (layoutClientChanged) {
         state.sidebarLayout = { columns: [] };
-      } else if (state.sidebarLayout.columns.length > 0) {
+      } else if (sidebarKeyChanged && state.sidebarLayout.columns.length > 0) {
         state.updateSidebarLayout(state.sidebarLayout);
       }
       state.sidebarFocusPanelId =

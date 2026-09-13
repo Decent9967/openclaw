@@ -17,6 +17,29 @@ import {
 type ChatPaneSidebarLayout = Parameters<typeof isSidebarSlotVisible>[0];
 type ChatPaneGatewaySnapshot = Parameters<typeof isDesktopPanelAvailable>[0];
 
+/** Shared by rail clicks and keyboard shortcuts; opening a panel is not a preference write. */
+export function openPreferredSidebarPanel(
+  state: ChatPageHost,
+  layout: ChatPaneSidebarLayout,
+  slot: SidebarSlotId,
+): ChatPaneSidebarLayout {
+  if (slot !== "dashboard") {
+    return openSlot(layout, slot);
+  }
+  const saved =
+    loadSettings().sidebarSessionLayouts?.[
+      canonicalUiSessionKeyForPersistence(state, state.sessionKey)
+    ];
+  const override = saved ? saved.dashboardPresentationOverride : null;
+  const next = { ...layout, dashboardPresentationOverride: override };
+  return saved && override === undefined
+    ? openSlot(next, slot)
+    : openDashboardPresentation(
+        next,
+        override ?? selectedChatSessionRow(state)?.boardPresentation ?? "split",
+      );
+}
+
 export function releaseAttachmentWorkspaceOwner(state: ChatPageHost, slot: SidebarSlotId): void {
   // Attachment views temporarily own Files content. Release that owner
   // with the slot so reopening Files restores the session workspace.
@@ -38,28 +61,7 @@ export function createChatPaneRails(params: {
   const { state, sidebarLayout } = params;
   const isPanelVisible = (slot: SidebarSlotId) => isSidebarSlotVisible(sidebarLayout, slot);
   const openPanelSlot = (slot: SidebarSlotId) => {
-    const savedLayout =
-      slot === "dashboard"
-        ? loadSettings().sidebarSessionLayouts?.[
-            canonicalUiSessionKeyForPersistence(state, state.sessionKey)
-          ]
-        : undefined;
-    // Selecting an existing legacy tab is not a new fullscreen/split choice.
-    const legacy =
-      savedLayout !== undefined && savedLayout.dashboardPresentationOverride === undefined;
-    const override = savedLayout ? savedLayout.dashboardPresentationOverride : null;
-    const nextLayout =
-      slot === "dashboard"
-        ? { ...sidebarLayout, dashboardPresentationOverride: override }
-        : sidebarLayout;
-    params.updateSidebarLayout(
-      slot === "dashboard" && !legacy
-        ? openDashboardPresentation(
-            nextLayout,
-            override ?? selectedChatSessionRow(state)?.boardPresentation ?? "split",
-          )
-        : openSlot(nextLayout, slot),
-    );
+    params.updateSidebarLayout(openPreferredSidebarPanel(state, sidebarLayout, slot));
     if (slot === "companion") {
       params.setObserverVisibility(true);
     }

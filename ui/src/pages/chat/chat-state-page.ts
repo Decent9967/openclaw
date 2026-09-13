@@ -391,14 +391,15 @@ export function createPageState(
   };
   state.updateSidebarLayout = (layout, options) => {
     const normalized = normalizeSidebarLayout(layout);
-    if (options?.dashboardPresentation === "personal") {
-      const presentation = sidebarDashboardPresentation(normalized);
-      if (presentation) {
-        const row = selectedChatSessionRow(state);
-        // Unknown metadata cannot establish that the user chose the shared default.
-        normalized.dashboardPresentationOverride =
-          row && presentation === (row.boardPresentation ?? "split") ? null : presentation;
-      }
+    const presentation =
+      options?.dashboardPresentation === "personal"
+        ? sidebarDashboardPresentation(normalized)
+        : undefined;
+    if (presentation) {
+      const row = selectedChatSessionRow(state);
+      // Unknown metadata cannot establish that the user chose the shared default.
+      normalized.dashboardPresentationOverride =
+        row && presentation === (row.boardPresentation ?? "split") ? null : presentation;
     }
     // Every close route commits here; tab switches retain the pending selection.
     if (
@@ -412,14 +413,22 @@ export function createPageState(
       renderLifecycle.invalidate();
       return;
     }
+    const layoutKey = canonicalUiSessionKeyForPersistence(state, state.sessionKey);
     state.settings = patchSettings({
       sidebarSessionLayouts: updateSidebarSessionLayout(
         loadSettings().sidebarSessionLayouts,
-        canonicalUiSessionKeyForPersistence(state, state.sessionKey),
+        layoutKey,
         normalized,
-        { geometryOnly: options?.geometryOnly },
+        {
+          geometryOnly: options?.geometryOnly,
+          dashboardPresentationOverride: presentation
+            ? normalized.dashboardPresentationOverride
+            : undefined,
+        },
       ),
     });
+    normalized.dashboardPresentationOverride =
+      state.settings.sidebarSessionLayouts?.[layoutKey]?.dashboardPresentationOverride;
     renderLifecycle.invalidate();
   };
   state.updateSidebarActivePanel = (panelId) => {

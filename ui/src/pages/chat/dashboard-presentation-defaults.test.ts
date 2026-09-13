@@ -232,6 +232,59 @@ afterEach(() => {
 });
 
 describe("dashboard default activation and personal layout persistence", () => {
+  it.each(["shared", "personal"] as const)(
+    "opens the %s expanded preference through the registered keyboard handler",
+    (kind) => {
+      const h = createDashboardHarness({
+        row: session({ boardPresentation: kind === "shared" ? "expanded" : "split" }),
+        savedLayout:
+          kind === "personal"
+            ? {
+                ...openDashboardPresentation({ columns: [] }, "expanded"),
+                dashboardPresentationOverride: "expanded",
+              }
+            : undefined,
+      });
+      h.pane.routeFace = "chat";
+      h.pane.active = true;
+      h.state.updateSidebarLayout(closeSlot(h.state.sidebarLayout, "dashboard"));
+      const event = new KeyboardEvent("keydown", {
+        key: "G",
+        code: "KeyG",
+        metaKey: true,
+        shiftKey: true,
+        altKey: true,
+        cancelable: true,
+      });
+      h.pane.handleDocumentKeydown(event);
+      expect(event.defaultPrevented).toBe(true);
+      expectPresentation(h.state.sidebarLayout, true);
+      expect(h.saved()?.dashboardPresentationOverride).toBe(
+        kind === "personal" ? "expanded" : null,
+      );
+    },
+  );
+
+  it("does not overwrite a newer cross-tab choice when opening Files", () => {
+    const h = createDashboardHarness({
+      row: session({ boardPresentation: "expanded" }),
+      savedLayout: {
+        ...openDashboardPresentation({ columns: [] }, "expanded"),
+        dashboardPresentationOverride: null,
+      },
+    });
+    h.sync();
+    const current = h.state.sidebarLayout;
+    patchSettings({
+      sidebarSessionLayouts: { [key]: { ...current, dashboardPresentationOverride: "split" } },
+    });
+    h.state.updateSidebarLayout(openSlot(current, "workspace"));
+    expect(h.saved()?.dashboardPresentationOverride).toBe("split");
+    expect(h.state.sidebarLayout.dashboardPresentationOverride).toBe("split");
+    h.revisit();
+    expectPresentation(h.state.sidebarLayout, false);
+  });
+
   it.each([
     { initial: "expanded", next: null, shared: "split" },
     { initial: "expanded", next: "split", shared: "expanded" },

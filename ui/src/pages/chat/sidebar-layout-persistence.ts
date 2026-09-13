@@ -25,7 +25,10 @@ export function updateSidebarSessionLayout(
   current: SidebarSessionLayouts | undefined,
   sessionKey: string,
   layout: SidebarLayout,
-  options?: { geometryOnly?: boolean },
+  options?: {
+    geometryOnly?: boolean;
+    dashboardPresentationOverride?: SidebarLayout["dashboardPresentationOverride"];
+  },
 ): SidebarSessionLayouts {
   const key = sessionKey.trim();
   const layouts = normalizeSidebarSessionLayouts(current);
@@ -52,11 +55,11 @@ export function updateSidebarSessionLayout(
   delete layouts[key];
   layouts[key] = normalizeSidebarLayout({
     ...next,
-    // Existing unmarked layouts have unknown provenance. Preserve them, rather
-    // than guessing whether a legacy expansion was automatic or intentional.
+    // Only an explicit presentation choice may replace the stored preference.
+    // Other layout writes can carry stale metadata from a retained pane.
     dashboardPresentationOverride:
-      next.dashboardPresentationOverride !== undefined
-        ? next.dashboardPresentationOverride
+      options?.dashboardPresentationOverride !== undefined
+        ? options.dashboardPresentationOverride
         : previous
           ? previous.dashboardPresentationOverride
           : null,
