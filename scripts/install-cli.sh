@@ -563,7 +563,7 @@ command_path_without_node_prefix() {
   IFS=: read -r -a path_entries <<<"$PATH"
   for path_entry in "${path_entries[@]}"; do
     if [[ "$path_entry" == "$prefix_bin" ]] ||
-      { [[ "$exclude_active_runtime" == "1" ]] && is_installer_node_bin "$path_entry"; }; then
+      { [[ "$exclude_active_runtime" == "1" ]] && is_installer_node_bin "${path_entry:-.}"; }; then
       continue
     fi
     filtered_path="${filtered_path}${separator}${path_entry}"
@@ -589,6 +589,9 @@ link_node_runtime_paths() {
   local dir
   local runtime_bin
   local resolved
+  # PATH entries resolve from this cwd; published links must work from any cwd.
+  [[ "$node_path" == /* ]] || node_path="$PWD/$node_path"
+  [[ "$npm_path" == /* ]] || npm_path="$PWD/$npm_path"
   dir="$(node_dir)"
   runtime_bin="${node_path%/*}"
 
@@ -603,6 +606,7 @@ link_node_runtime_paths() {
     # These optional tools cannot point through the alias we republish below.
     resolved="$(command_path_without_node_prefix "$name" 1 || true)"
     if [[ -n "$resolved" && "$resolved" != "${dir}/bin/${name}" ]]; then
+      [[ "$resolved" == /* ]] || resolved="$PWD/$resolved"
       ln -sfn "$resolved" "${dir}/bin/${name}"
     fi
   done
