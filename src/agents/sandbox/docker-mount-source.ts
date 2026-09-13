@@ -83,9 +83,13 @@ async function discoverSourceNamespace(
     return undefined;
   }
   const cgroup = readOptionalProcFile("/proc/self/cgroup");
-  const ids = [...cgroup.matchAll(/(?:\/docker\/|docker-)([a-f0-9]{64})(?:\/|\.scope|$)/gm)].map(
-    (match) => match[1],
-  );
+  const ids: string[] = [];
+  for (const match of cgroup.matchAll(/(?:\/docker\/|docker-)([a-f0-9]{64})(?:\/|\.scope|$)/gm)) {
+    const id = match[1];
+    if (id) {
+      ids.push(id);
+    }
+  }
   // Host mount tables also contain other containers' IDs. Only Docker's mounts
   // of this process's own hostname/resolver files identify a self candidate.
   for (const line of readOptionalProcFile("/proc/self/mountinfo").split("\n")) {
