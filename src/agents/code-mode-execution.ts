@@ -135,6 +135,7 @@ export async function runCodeModeExec(params: {
     const result = await runCodeModeWorker(
       {
         kind: "exec",
+        retainFinalValue: !params.restartSafe,
         source: params.code,
         preflightDeclarations,
         language: params.language,
@@ -151,24 +152,10 @@ export async function runCodeModeExec(params: {
     );
     output.append(result.output);
     return await settleCodeModeResult({
-      owner,
+      ...context,
       pending,
       reservedActiveRunSlot: releaseReservation !== undefined,
       result,
-      output,
-      replaySafe: params.restartSafe,
-      budget,
-      parentToolCallId: params.toolCallId,
-      codeModeReplayId,
-      ctx: params.ctx,
-      config,
-      runtime,
-      catalogProjection,
-      namespaceRuntime,
-      bridgeDispatch,
-      approvalWait,
-      signal,
-      onUpdate: params.onUpdate,
     });
   } catch (error) {
     const code = signal.aborted ? ("aborted" as const) : codeModeFailureCode(error);
@@ -487,6 +474,7 @@ async function settleCodeModeResult(params: CodeModeSettlementContext) {
         result = await runCodeModeWorker(
           {
             kind: "resume",
+            retainFinalValue: !params.replaySafe,
             snapshot: result.snapshot,
             config: {
               ...params.config,
@@ -578,7 +566,12 @@ async function settleCodeModeResult(params: CodeModeSettlementContext) {
     replaySafe: params.replaySafe,
     telemetry: telemetry(params.runtime),
   };
-  return output.takeResult(metadata, channels, params.runtime.hasNetworkContent());
+  const networkContent = params.runtime.hasNetworkContent();
+  return output.takeResult(metadata, channels, networkContent, (source) =>
+    params.replaySafe
+      ? { reason: "Not retained in restart-safe mode. Return less data." }
+      : params.owner.results.retain(source, networkContent),
+  );
 }
 
 export async function runWait(params: {
@@ -667,6 +660,7 @@ export async function runWait(params: {
       result = await runCodeModeWorker(
         {
           kind: "resume",
+          retainFinalValue: !state.replaySafe,
           snapshot: state.snapshot,
           config: {
             ...state.config,
