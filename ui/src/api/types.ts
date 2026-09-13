@@ -5,6 +5,7 @@ import type {
   CronListParams,
   CronRunLogEntry as ProtocolCronRunLogEntry,
   CronRunsParams,
+  ErrorShape,
   SessionsFilesListResult as ProtocolSessionsFilesListResult,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type {
@@ -192,6 +193,7 @@ export type NostrStatus = {
 type ConfigSnapshotIssue = { path: string; message: string };
 
 export type ConfigSnapshot = {
+  writeError?: ErrorShape;
   path?: string | null;
   exists?: boolean | null;
   raw?: string | null;
@@ -389,6 +391,9 @@ export type ModelAuthStatusProfile =
   import("../../../src/gateway/server-methods/models-auth-status.js").ModelAuthStatusProfile;
 export type ModelAuthStatusResult =
   import("../../../src/gateway/server-methods/models-auth-status.js").ModelAuthStatusResult;
+export type ProviderLoginOption = NonNullable<
+  NonNullable<ModelAuthStatusResult["providerCapabilities"]>[number]["loginOptions"]
+>[number];
 export type ModelsProbeResult =
   import("../../../packages/gateway-protocol/src/schema.js").ModelsProbeResult;
 export type SystemAgentSetupActivateParams =

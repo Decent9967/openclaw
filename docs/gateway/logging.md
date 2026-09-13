@@ -18,7 +18,7 @@ OpenClaw has two log surfaces:
 At startup, the Gateway logs the resolved default agent model plus the mode defaults that affect new sessions:
 
 ```text
-agent model: openai/gpt-5.6-sol (thinking=medium, fast=on)
+agent model: openai/gpt-6-astra (thinking=medium, fast=on)
 ```
 
 `thinking` comes from the default agent, model params, or the global agent default. When unset it shows `medium`. `fast` comes from the default agent or the model's `fastMode` params.
@@ -45,6 +45,8 @@ The Control UI Logs tab tails this file via the gateway (`logs.tail`). The CLI d
 openclaw logs --follow
 ```
 
+If a tail read observes that the active file has disappeared, the Control UI clears its previous records and follows the recreated file. Missing files still return an empty tail; filesystem read errors remain visible.
+
 ### Verbose vs. log levels
 
 - **File logs** are controlled exclusively by `logging.level`.
@@ -59,6 +61,15 @@ Failed SQLite session writes include a bounded, redacted `error` summary in
 their structured file-log record, with cause and error-code details when
 available. Long summaries are truncated. The record retains its write timing
 and store fields.
+
+### SQLite snapshot cleanup
+
+Failed removal of a temporary read-only SQLite snapshot is recorded once by its
+cleanup owner in the structured file log, with the owned path, removal operation,
+and filesystem error code when available. These diagnostics do not write to
+subprocess stdout or stderr, so a successful read keeps its result and a failed
+update retains its original error detail. Existing required-cleanup failures
+remain errors.
 
 ### Slow agent database opens
 
@@ -145,7 +156,10 @@ Tune console verbosity independently:
 
 OpenClaw masks sensitive tokens before log or transcript output leaves the process. This redaction policy applies at console, file-log, OTLP log-record, and session transcript text sinks. Matching secret values are masked before JSONL lines or messages are written to disk.
 
-Model-visible tool-result text preserves ambiguous source assignments such as
+The OpenClaw harness masks finalized tool-result text after middleware, before
+it enters live model context, including exec output and tool errors. Media bytes
+and the original execution arguments stay intact; later replay reuses the masked
+result. Model-visible tool-result text preserves ambiguous source assignments such as
 `token = timeObserverToken`. Registered secrets and explicit credential forms,
 including structured fields, authorization headers, URL credentials, and known
 token formats, remain masked. Direct reads of `.env`
@@ -155,10 +169,12 @@ secrets instead of relying on key-name matching. Other transcript fields and
 diagnostic sinks retain broad assignment matching.
 
 - Sensitive-value redaction is always enabled.
-- `logging.redactPatterns`: array of regex strings (overrides defaults)
+- `logging.redactPatterns`: array of regex strings (replaces the default string list). Built-in structural protections for form bodies, structured authorization headers, and bare AWS secret access keys always apply.
   - Use raw regex strings (auto `gi`), or `/pattern/flags` for custom flags.
   - Matches are masked keeping the first 6 + last 4 chars (values >= 18 chars). Shorter values become `***`.
   - Defaults cover common key assignments, CLI flags, JSON fields, bearer headers, PEM blocks, popular vendor token prefixes, and payment credential field names (card number, CVC/CVV, shared payment token, payment credential).
+
+File and JSON console records finish masking before final JSON encoding. Rules run in order over decoded values, then serialized record context, with later rules seeing earlier masks. String matches retain their existing token hints so later rules can match those hints. Structured credential fields use full masks; matched numbers, booleans, and null become the JSON string `"***"`. File records retain built-in credential patterns when custom patterns are configured.
 
 Safety boundaries such as Control UI tool-call events, `sessions_history` output, diagnostics exports, provider errors, exec approval display, and Gateway WebSocket logs always redact. `logging.redactPatterns` adds deployment-specific patterns.
 
@@ -168,6 +184,23 @@ The gateway prints WebSocket protocol logs in two modes:
 
 - **Normal mode (no `--verbose`)**: only "interesting" RPC results print - errors (`ok=false`), slow calls (default threshold: `>= 50ms`), and parse errors.
 - **Verbose mode (`--verbose`)**: prints all WS request/response traffic.
+
+With `diagnostics.enabled: true` and warning logging enabled, `sessions.list`
+handlers taking at least one second also emit `slow session list`. The record
+includes process/thread identity, the request trace, and `cacheRole`: a completed
+cache hit, an in-flight follower, a projection owner, or `unreached` if the handler
+failed before selecting a cache path. Followers can include `workTraceId` and
+`workSpanId` to identify the request producing their shared result. Successful
+list results report `selectedRowCount` for every cache role.
+
+Projection owners report phase totals, visibility-repair counts, synchronous
+preparation/row time, and `yieldWaitMs`/`yieldCount` for time spent awaiting the
+event loop. Hits and followers omit those projection counters. `rows` includes
+its synchronous and yielded intervals; do not add those details to the phase
+total again. `handlerElapsedMs` starts before parameter validation and excludes
+admission before the handler. The `response` phase includes the synchronous response callback. These are elapsed
+durations, not CPU time or proof of client receipt. No query text or session
+contents are included.
 
 ### WS log style
 
