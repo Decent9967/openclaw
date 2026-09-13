@@ -273,19 +273,29 @@ export abstract class ChatPaneBoard extends ChatPaneHistory {
     this.boardProviderLease = undefined;
   }
 
-  protected syncRetainedBoardSession(board: ResolvedBoardView): void {
-    const sessionKey = this.resolveBoardSessionKey(board.snapshot.sessionKey);
-    const savedLayout = this.state
+  private readSavedDashboardLayout(): SidebarLayout | undefined {
+    return this.state
       ? loadSettings().sidebarSessionLayouts?.[
           canonicalUiSessionKeyForPersistence(this.state, this.state.sessionKey)
         ]
       : undefined;
+  }
+
+  protected syncRetainedBoardSession(board: ResolvedBoardView): void {
+    const sessionKey = this.resolveBoardSessionKey(board.snapshot.sessionKey);
     const routeRequestsDashboard = this.routeFace === "dashboard" || this.dashboardExpanded;
     const activationKey = boardProviderCacheKey(this.resolveBoardConversation());
     const activation = this.dashboardPresentationActivation;
     const client = this.state?.client ?? null;
     const row = this.state ? selectedChatSessionRow(this.state) : undefined;
-    if (!this.presented || !routeRequestsDashboard) {
+    const pendingRoute =
+      activation?.pendingRoute === true &&
+      activation.key === activationKey &&
+      activation.client === client;
+    if (activation && routeRequestsDashboard) {
+      activation.pendingRoute = false;
+    }
+    if (!this.presented || (!routeRequestsDashboard && !pendingRoute)) {
       this.dashboardPresentationActivation = undefined;
     } else if (
       board.available &&
@@ -294,6 +304,8 @@ export abstract class ChatPaneBoard extends ChatPaneHistory {
         activation.client !== client ||
         activation.expanded !== this.dashboardExpanded)
     ) {
+      // Only opening/activation may read preferences; ordinary renders stay storage-free.
+      const savedLayout = this.readSavedDashboardLayout();
       // A row, including an absent optional value, is the authoritative default.
       // Do not settle an initial open against an as-yet-unloaded metadata cache.
       const hasPersonalLayout =
@@ -328,7 +340,7 @@ export abstract class ChatPaneBoard extends ChatPaneHistory {
         previous === false &&
         board.hasBoard &&
         board.face === "chat" &&
-        !savedLayout
+        !this.readSavedDashboardLayout()
       ) {
         this.showDashboard((row?.boardPresentation ?? "split") === "expanded");
       }
@@ -529,6 +541,14 @@ export abstract class ChatPaneBoard extends ChatPaneHistory {
       return;
     }
     const layout = openDashboardPresentation(state.sidebarLayout, expanded ? "expanded" : "split");
+    // The child may render before its parent acknowledges the requested route.
+    // Consume this one-shot activation there, rather than saving a preference.
+    this.dashboardPresentationActivation = {
+      client: state.client,
+      key: boardProviderCacheKey(this.resolveBoardConversation()),
+      expanded: this.dashboardExpanded,
+      pendingRoute: this.routeFace !== "dashboard" && !this.dashboardExpanded,
+    };
     // Route/default/tool applications are not personal preference writes.
     this.commitSidebarLayout(layout, { persist: false });
     this.persistBoardSessionView({ face: "dashboard" });

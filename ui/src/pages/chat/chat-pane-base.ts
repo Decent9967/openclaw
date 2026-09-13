@@ -486,6 +486,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     client: ChatPageHost["client"];
     key: string;
     expanded: boolean;
+    pendingRoute?: boolean;
   };
   protected swarmHydrator: SwarmRosterHydrator | null = null;
   protected readonly sessionDiscussionStates = new Map<string, SessionDiscussionState>();

@@ -14215,6 +14215,7 @@ public struct SessionRow: Codable, Sendable {
     public let color: String?
     public let channelavatarurl: String?
     public let boardface: AnyCodable?
+    public let boardpresentation: AnyCodable?
     public let displayname: String?
     public let derivedtitle: String?
     public let lastmessagepreview: String?
@@ -14298,6 +14299,7 @@ public struct SessionRow: Codable, Sendable {
         color: String? = nil,
         channelavatarurl: String? = nil,
         boardface: AnyCodable? = nil,
+        boardpresentation: AnyCodable? = nil,
         displayname: String? = nil,
         derivedtitle: String? = nil,
         lastmessagepreview: String? = nil,
@@ -14380,6 +14382,7 @@ public struct SessionRow: Codable, Sendable {
         self.color = color
         self.channelavatarurl = channelavatarurl
         self.boardface = boardface
+        self.boardpresentation = boardpresentation
         self.displayname = displayname
         self.derivedtitle = derivedtitle
         self.lastmessagepreview = lastmessagepreview
@@ -14464,6 +14467,7 @@ public struct SessionRow: Codable, Sendable {
         case color
         case channelavatarurl = "channelAvatarUrl"
         case boardface = "boardFace"
+        case boardpresentation = "boardPresentation"
         case displayname = "displayName"
         case derivedtitle = "derivedTitle"
         case lastmessagepreview = "lastMessagePreview"
@@ -16642,6 +16646,7 @@ public struct SessionsPatchMutation: Codable, Sendable {
     public let color: AnyCodable?
     public let category: AnyCodable?
     public let boardface: AnyCodable?
+    public let boardpresentation: AnyCodable?
     public let statusnote: AnyCodable?
     public let attention: AnyCodable?
     public let ttlminutes: Int?
@@ -16677,6 +16682,7 @@ public struct SessionsPatchMutation: Codable, Sendable {
         color: AnyCodable? = nil,
         category: AnyCodable? = nil,
         boardface: AnyCodable? = nil,
+        boardpresentation: AnyCodable? = nil,
         statusnote: AnyCodable? = nil,
         attention: AnyCodable? = nil,
         ttlminutes: Int? = nil,
@@ -16711,6 +16717,7 @@ public struct SessionsPatchMutation: Codable, Sendable {
         self.color = color
         self.category = category
         self.boardface = boardface
+        self.boardpresentation = boardpresentation
         self.statusnote = statusnote
         self.attention = attention
         self.ttlminutes = ttlminutes
@@ -16747,6 +16754,7 @@ public struct SessionsPatchMutation: Codable, Sendable {
         case color
         case category
         case boardface = "boardFace"
+        case boardpresentation = "boardPresentation"
         case statusnote = "statusNote"
         case attention
         case ttlminutes = "ttlMinutes"
@@ -16791,6 +16799,7 @@ public struct SessionsPatchParams: Codable, Sendable {
     public let color: AnyCodable?
     public let category: AnyCodable?
     public let boardface: AnyCodable?
+    public let boardpresentation: AnyCodable?
     public let statusnote: AnyCodable?
     public let attention: AnyCodable?
     public let ttlminutes: Int?
@@ -16833,6 +16842,7 @@ public struct SessionsPatchParams: Codable, Sendable {
         color: AnyCodable? = nil,
         category: AnyCodable? = nil,
         boardface: AnyCodable? = nil,
+        boardpresentation: AnyCodable? = nil,
         statusnote: AnyCodable? = nil,
         attention: AnyCodable? = nil,
         ttlminutes: Int? = nil,
@@ -16874,6 +16884,7 @@ public struct SessionsPatchParams: Codable, Sendable {
         self.color = color
         self.category = category
         self.boardface = boardface
+        self.boardpresentation = boardpresentation
         self.statusnote = statusnote
         self.attention = attention
         self.ttlminutes = ttlminutes
@@ -16917,6 +16928,7 @@ public struct SessionsPatchParams: Codable, Sendable {
         case color
         case category
         case boardface = "boardFace"
+        case boardpresentation = "boardPresentation"
         case statusnote = "statusNote"
         case attention
         case ttlminutes = "ttlMinutes"
@@ -17094,17 +17106,20 @@ public struct SessionsResolveCandidate: Codable, Sendable {
     public let agentid: String
     public let displayname: String?
     public let boardface: AnyCodable?
+    public let boardpresentation: AnyCodable?
 
     public init(
         key: String,
         agentid: String,
         displayname: String? = nil,
-        boardface: AnyCodable? = nil)
+        boardface: AnyCodable? = nil,
+        boardpresentation: AnyCodable? = nil)
     {
         self.key = key
         self.agentid = agentid
         self.displayname = displayname
         self.boardface = boardface
+        self.boardpresentation = boardpresentation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -17112,6 +17127,7 @@ public struct SessionsResolveCandidate: Codable, Sendable {
         case agentid = "agentId"
         case displayname = "displayName"
         case boardface = "boardFace"
+        case boardpresentation = "boardPresentation"
     }
 }
 
@@ -28311,12 +28327,14 @@ public struct SessionsResolveResultSuccess: Codable, Sendable {
     public let agentid: String
     public let displayname: String?
     public let boardface: AnyCodable?
+    public let boardpresentation: AnyCodable?
 
     public init(
         key: String,
         agentid: String,
         displayname: String? = nil,
-        boardface: AnyCodable? = nil
+        boardface: AnyCodable? = nil,
+        boardpresentation: AnyCodable? = nil
     )
     {
         self.ok = true
@@ -28324,6 +28342,7 @@ public struct SessionsResolveResultSuccess: Codable, Sendable {
         self.agentid = agentid
         self.displayname = displayname
         self.boardface = boardface
+        self.boardpresentation = boardpresentation
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -28332,13 +28351,14 @@ public struct SessionsResolveResultSuccess: Codable, Sendable {
         case agentid = "agentId"
         case displayname = "displayName"
         case boardface = "boardFace"
+        case boardpresentation = "boardPresentation"
     }
 
     public init(from decoder: Decoder) throws {
         let rawContainer = try decoder.container(keyedBy: GatewayAnyCodingKey.self)
         let unexpectedKeys = rawContainer.allKeys
             .map(\.stringValue)
-            .filter { !Set(["ok", "key", "agentId", "displayName", "boardFace"]).contains($0) }
+            .filter { !Set(["ok", "key", "agentId", "displayName", "boardFace", "boardPresentation"]).contains($0) }
         if !unexpectedKeys.isEmpty {
             throw DecodingError.dataCorrupted(
                 .init(
@@ -28361,6 +28381,7 @@ public struct SessionsResolveResultSuccess: Codable, Sendable {
         self.agentid = try container.decode(String.self, forKey: .agentid)
         self.displayname = try container.decodeIfPresent(String.self, forKey: .displayname)
         self.boardface = try container.decodeIfPresent(AnyCodable.self, forKey: .boardface)
+        self.boardpresentation = try container.decodeIfPresent(AnyCodable.self, forKey: .boardpresentation)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -28370,6 +28391,7 @@ public struct SessionsResolveResultSuccess: Codable, Sendable {
         try container.encode(agentid, forKey: .agentid)
         try container.encodeIfPresent(displayname, forKey: .displayname)
         try container.encodeIfPresent(boardface, forKey: .boardface)
+        try container.encodeIfPresent(boardpresentation, forKey: .boardpresentation)
     }
 }
 

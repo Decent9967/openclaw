@@ -62,7 +62,7 @@ import { reconcileWaitingApprovalsFromSnapshot } from "./tool-stream-status.ts";
 export abstract class ChatPaneContext extends ChatPaneLifecycle {
   private gatewayConnectionLifecycle?: ReturnType<typeof createGatewayConnectionLifecycle>;
   private outboxRecoveryReady = false;
-  private sidebarLayoutClient?: ApplicationGatewaySnapshot["client"];
+  private sidebarLayoutSource?: { client: ApplicationGatewaySnapshot["client"]; ready: boolean };
   // Capability identity matters because a replacement restarts its canonical revision at zero.
   private canonicalSessionList?: { sessions: ApplicationContext["sessions"]; revision: number };
 
@@ -318,7 +318,10 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       }));
     const sourceChanged = connectionLifecycle.transition(snapshot);
     const clientChanged = this.connectedClient !== snapshot.client;
-    const layoutSourceChanged = this.sidebarLayoutClient !== snapshot.client;
+    const layoutSourceChanged =
+      !this.sidebarLayoutSource ||
+      (snapshot.client !== null && this.sidebarLayoutSource.client !== snapshot.client) ||
+      (snapshot.phase === "connected" && !this.sidebarLayoutSource.ready);
     if (clientChanged) {
       this.replaceStagedAttachmentGatewayOwner(snapshot.client);
     }
@@ -426,10 +429,11 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
       isGatewayMethodAdvertised(snapshot, "desktop.observe") === true;
     const sidebarSessionKey = canonicalUiSessionKeyForPersistence(state, state.sessionKey);
     const sidebarKeyChanged = sidebarSessionKey !== previousSidebarSessionKey;
-    // Restore once the source is ready, including the first connection. Transport
-    // reconnects retire subscriptions, not the live layout or its presentation.
-    if (state.connected && sidebarSessionKey && (layoutSourceChanged || sidebarKeyChanged)) {
-      this.sidebarLayoutClient = snapshot.client;
+    // Restore offline/compact preferences immediately, then migrate ready-only
+    // panels once. A transport reconnect must not reload the active layout.
+    if (sidebarSessionKey && (layoutSourceChanged || sidebarKeyChanged)) {
+      this.sidebarLayoutSource = { client: snapshot.client, ready: state.connected };
+      this.dashboardPresentationActivation = undefined;
       const sidebarSettings = migrateLegacyDockVisibility({
         settings: loadSettings(),
         sessionKey: sidebarSessionKey,

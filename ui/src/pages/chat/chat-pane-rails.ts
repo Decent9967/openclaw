@@ -1,4 +1,6 @@
 import { isDesktopPanelAvailable } from "../../app/panel-availability.ts";
+import { loadSettings } from "../../app/settings.ts";
+import { canonicalUiSessionKeyForPersistence } from "../../lib/sessions/session-key.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import { selectedChatSessionRow } from "./chat-state-route.ts";
 import { createBackgroundTasksProps } from "./components/chat-background-tasks.ts";
@@ -36,15 +38,27 @@ export function createChatPaneRails(params: {
   const { state, sidebarLayout } = params;
   const isPanelVisible = (slot: SidebarSlotId) => isSidebarSlotVisible(sidebarLayout, slot);
   const openPanelSlot = (slot: SidebarSlotId) => {
-    params.updateSidebarLayout(
+    const savedLayout =
       slot === "dashboard"
+        ? loadSettings().sidebarSessionLayouts?.[
+            canonicalUiSessionKeyForPersistence(state, state.sessionKey)
+          ]
+        : undefined;
+    // Selecting an existing legacy tab is not a new fullscreen/split choice.
+    const legacy =
+      savedLayout !== undefined && savedLayout.dashboardPresentationOverride === undefined;
+    const override = savedLayout ? savedLayout.dashboardPresentationOverride : null;
+    const nextLayout =
+      slot === "dashboard"
+        ? { ...sidebarLayout, dashboardPresentationOverride: override }
+        : sidebarLayout;
+    params.updateSidebarLayout(
+      slot === "dashboard" && !legacy
         ? openDashboardPresentation(
-            sidebarLayout,
-            sidebarLayout.dashboardPresentationOverride ??
-              selectedChatSessionRow(state)?.boardPresentation ??
-              "split",
+            nextLayout,
+            override ?? selectedChatSessionRow(state)?.boardPresentation ?? "split",
           )
-        : openSlot(sidebarLayout, slot),
+        : openSlot(nextLayout, slot),
     );
     if (slot === "companion") {
       params.setObserverVisibility(true);

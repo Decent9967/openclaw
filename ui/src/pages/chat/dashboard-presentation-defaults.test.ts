@@ -12,6 +12,7 @@ import { showToast } from "../../lib/toast.ts";
 import { createMockBoardProvider } from "../../test-helpers/board-provider.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
+import { createChatPaneRails } from "./chat-pane-rails.ts";
 import type { ResolvedBoardView } from "./chat-pane-shared.ts";
 import { sidebarRegionCallbacks } from "./chat-pane-sidebar-layout.ts";
 import {
@@ -231,6 +232,108 @@ afterEach(() => {
 });
 
 describe("dashboard default activation and personal layout persistence", () => {
+  it.each([
+    { initial: "expanded", next: null, shared: "split" },
+    { initial: "expanded", next: "split", shared: "expanded" },
+    { initial: "split", next: "expanded", shared: "split" },
+  ] as const)(
+    "uses the latest cross-tab override $next when opening Dashboard",
+    ({ initial, next, shared }) => {
+      const savedLayout = {
+        ...openDashboardPresentation({ columns: [] }, initial),
+        dashboardPresentationOverride: initial,
+      };
+      const h = createDashboardHarness({
+        savedLayout,
+        row: session({ boardPresentation: shared }),
+      });
+      h.sync();
+      h.state.updateSidebarLayout(openSlot(h.state.sidebarLayout, "terminal"));
+      const rails = createChatPaneRails({
+        state: h.state,
+        sidebarLayout: h.state.sidebarLayout,
+        presentationId: "cross-tab-dashboard",
+        presented: true,
+        gatewaySnapshot: h.pane.context.gateway.snapshot,
+        setObserverVisibility: vi.fn(),
+        updateSidebarLayout: h.state.updateSidebarLayout,
+      });
+      patchSettings({
+        sidebarSessionLayouts: { [key]: { ...savedLayout, dashboardPresentationOverride: next } },
+      });
+      rails.openPanelSlot("dashboard");
+      expectPresentation(h.state.sidebarLayout, (next ?? shared) === "expanded");
+      expect(h.saved()?.dashboardPresentationOverride).toBe(next);
+    },
+  );
+
+  it("keeps ordinary Chat and active Dashboard renders storage-free", () => {
+    const h = createDashboardHarness();
+    const getItem = vi.spyOn(localStorage, "getItem");
+    h.pane.routeFace = "chat";
+    getItem.mockClear();
+    h.sync();
+    h.sync();
+    expect(getItem).not.toHaveBeenCalled();
+    h.pane.routeFace = "dashboard";
+    h.sync();
+    getItem.mockClear();
+    h.sync();
+    h.sync();
+    expect(getItem).not.toHaveBeenCalled();
+  });
+
+  it("activates a legacy Dashboard tab without adopting a differing shared mode", () => {
+    const legacy = openSlot(openDashboardPresentation({ columns: [] }, "split"), "terminal");
+    const h = createDashboardHarness({
+      savedLayout: legacy,
+      row: session({ boardPresentation: "expanded" }),
+    });
+    h.sync();
+    const rails = createChatPaneRails({
+      state: h.state,
+      sidebarLayout: h.state.sidebarLayout,
+      presentationId: "legacy-dashboard",
+      presented: true,
+      gatewaySnapshot: h.pane.context.gateway.snapshot,
+      setObserverVisibility: vi.fn(),
+      updateSidebarLayout: h.state.updateSidebarLayout,
+    });
+    rails.openPanelSlot("dashboard");
+    expectPresentation(h.state.sidebarLayout, false);
+    expect(h.saved()?.dashboardPresentationOverride).toBeUndefined();
+    h.revisit();
+    expectPresentation(h.state.sidebarLayout, false);
+  });
+
+  it.each(["split", "expanded"] as const)(
+    "keeps a transient %s request through Chat-to-Dashboard activation, but not a revisit",
+    (requested) => {
+      const shared = requested === "expanded" ? "split" : "expanded";
+      const h = createDashboardHarness({ row: session({ boardPresentation: shared }) });
+      h.pane.routeFace = "chat";
+      h.sync();
+      h.pane.handleBoardCommand({
+        sessionKey: key,
+        command: { kind: "set_chat_dock", dock: requested === "expanded" ? "hidden" : "right" },
+      });
+      expectPresentation(h.state.sidebarLayout, requested === "expanded");
+      // A child update can run before the parent publishes the requested route.
+      h.sync();
+      h.pane.routeFace = "dashboard";
+      h.sync();
+      expectPresentation(h.state.sidebarLayout, requested === "expanded");
+      expect(
+        loadSettings().sidebarSessionLayouts?.[key]?.dashboardPresentationOverride,
+      ).toBeUndefined();
+      h.pane.routeFace = "chat";
+      h.sync();
+      h.pane.routeFace = "dashboard";
+      h.sync();
+      expectPresentation(h.state.sidebarLayout, shared === "expanded");
+    },
+  );
+
   it("opens a dashboard route in split only once and preserves a later panel choice", () => {
     const h = createDashboardHarness();
     h.state.updateSidebarLayout(openSlot(h.state.sidebarLayout, "terminal"));

@@ -33,7 +33,7 @@ function row(presentation: "split" | "expanded") {
 async function openDashboard(
   page: Page,
   presentation: "split" | "expanded",
-  options: { readOnly?: boolean; expandedLink?: boolean } = {},
+  options: { readOnly?: boolean; expandedLink?: boolean; face?: "chat" | "dashboard" } = {},
 ) {
   const gateway = await installMockGateway(page, {
     sessionKey: key,
@@ -58,12 +58,17 @@ async function openDashboard(
       },
     },
   });
-  const url = new URL(controlUiSessionUrl(suite.server.baseUrl, key, "dashboard"));
+  const url = new URL(controlUiSessionUrl(suite.server.baseUrl, key, options.face ?? "dashboard"));
   if (options.expandedLink) {
     url.searchParams.set("dashboard", "expanded");
   }
   await page.goto(url.href);
-  await page.locator("openclaw-board-view").waitFor();
+  if (options.face === "chat") {
+    await page.locator(".chat-pane__header").waitFor();
+    await gateway.waitForRequest("board.get");
+  } else {
+    await page.locator("openclaw-board-view").waitFor();
+  }
   return gateway;
 }
 
@@ -92,6 +97,32 @@ async function presentationOverride(page: Page) {
 }
 
 suite.define(() => {
+  it.each(["split", "expanded"] as const)(
+    "keeps the agent-requested %s view through actual face-change navigation",
+    async (requested) => {
+      const shared = requested === "expanded" ? "split" : "expanded";
+      await suite.withPage({ viewport: { width: 1440, height: 1000 } }, async ({ page }) => {
+        const gateway = await openDashboard(page, shared, { face: "chat" });
+        await gateway.emitGatewayEvent("board.command", {
+          sessionKey: key,
+          command: { kind: "set_chat_dock", dock: requested === "expanded" ? "hidden" : "right" },
+        });
+        // Navigation may replace the raw key with its friendly session slug.
+        await expect.poll(() => new URL(page.url()).pathname).toContain("/dashboard/main/");
+        await page.locator("openclaw-board-view").waitFor({ state: "visible" });
+        const chat = page.locator(".sidebar-region__primary");
+        await chat.waitFor({ state: requested === "expanded" ? "hidden" : "visible" });
+        expect(await presentationOverride(page)).toBeUndefined();
+        await page.goto(controlUiSessionUrl(suite.server.baseUrl, key, "chat"));
+        await page.locator(".chat-pane__header").waitFor();
+        await page.goto(controlUiSessionUrl(suite.server.baseUrl, key, "dashboard"));
+        await page.locator("openclaw-board-view").waitFor({ state: "visible" });
+        await chat.waitFor({ state: shared === "expanded" ? "hidden" : "visible" });
+        expect(await presentationOverride(page)).toBeUndefined();
+      });
+    },
+  );
+
   it("saves a conditional shared default while a fresh reader can override it locally", async () => {
     await suite.withPage({ viewport: { width: 1440, height: 1000 } }, async ({ page }) => {
       const gateway = await openDashboard(page, "split");
