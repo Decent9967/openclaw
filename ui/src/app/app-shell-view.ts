@@ -22,7 +22,6 @@ import { normalizeAgentId, resolveUiSelectedSessionAgentId } from "../lib/sessio
 import { isTerminalAvailable } from "../lib/terminal-availability.ts";
 import type { NewSessionTarget } from "../pages/new-session/location.ts";
 import { pluginTabKey, pluginTabRefFromSearch } from "../pages/plugin/route.ts";
-import { renderControlUiPluginRecovery } from "../plugins/control-ui-contributions.ts";
 import { renderPluginSurface } from "../plugins/control-ui-view.ts";
 import type { ShellRouteState } from "./app-host-route-state.ts";
 import { renderCommandPaletteLoading } from "./app-shell-command-palette-loading.ts";
@@ -48,6 +47,7 @@ import {
 import { isMobileNavLayout, shouldMergeChatChrome } from "./mobile-nav-layout.ts";
 import type { NativeHistoryState } from "./native-web-chrome.ts";
 import { isNativeEmbedHost, isNativeWebChromeHost } from "./native-web-chrome.ts";
+import { beginNativeWindowDragFromTopInset } from "./native-window-drag.ts";
 import {
   floatingSidebarAttentionVisible,
   navigationSurfaceIsHidden,
@@ -550,6 +550,7 @@ export function renderApplicationShell(host: ShellViewHost) {
           activeRoute === "custodian" ? "content--custodian" : ""
         } ${activeRoute === "workboard" ? "content--workboard" : ""}"
         .tabIndex=${-1}
+        @mousedown=${beginNativeWindowDragFromTopInset}
         ?inert=${(!nativeEmbed && pageActionsBlocked) || (mobileNavLayout && navDrawerOpen)}
       >
         ${
@@ -698,7 +699,11 @@ export function renderApplicationShell(host: ShellViewHost) {
       <openclaw-toast-host></openclaw-toast-host>
     </div>
   `;
-  return html`${renderPluginSurface(
+  // Keep plugin settings reachable when a replacement owns the workspace.
+  if (activeRoute === "plugins") {
+    return workspace;
+  }
+  return renderPluginSurface(
     "workspace",
     {
       sessionKey: host.activeSessionKey,
@@ -714,5 +719,5 @@ export function renderApplicationShell(host: ShellViewHost) {
       routeId: activeRoute,
     },
     workspace,
-  )}${renderControlUiPluginRecovery(context.plugins, activeRoute)}`;
+  );
 }

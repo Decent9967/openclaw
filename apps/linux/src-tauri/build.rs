@@ -14,6 +14,8 @@ fn main() {
         "open_release_page",
         "relaunch",
         "updater_ready",
+        "window_chrome_drag",
+        "window_chrome_request",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()

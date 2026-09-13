@@ -23,6 +23,11 @@ mod quickchat_widgets;
 mod remote_gateway;
 mod tray;
 mod updater;
+mod window_chrome;
+#[cfg(target_os = "linux")]
+mod window_chrome_linux;
+#[cfg(target_os = "macos")]
+mod window_chrome_macos;
 
 use cli::{CliError, OpenClawCli};
 use gateway::{GatewayAction, GatewaySnapshot, ReadyGateway};
@@ -1501,14 +1506,19 @@ impl DesktopState {
     }
 
     pub(crate) fn main_window_has_local_content(&self, window: &Webview) -> bool {
-        window.url().is_ok_and(|mut current_url| {
-            let mut local_url = self.inner.local_url.clone();
-            current_url.set_query(None);
-            current_url.set_fragment(None);
-            local_url.set_query(None);
-            local_url.set_fragment(None);
-            current_url == local_url
-        })
+        window
+            .url()
+            .is_ok_and(|url| self.main_window_has_local_url(&url))
+    }
+
+    pub(crate) fn main_window_has_local_url(&self, url: &Url) -> bool {
+        let mut current_url = url.clone();
+        let mut local_url = self.inner.local_url.clone();
+        current_url.set_query(None);
+        current_url.set_fragment(None);
+        local_url.set_query(None);
+        local_url.set_fragment(None);
+        current_url == local_url
     }
 
     fn update_tray(&self, snapshot: &GatewaySnapshot) {
@@ -2639,11 +2649,15 @@ fn replace_main_webview(
     let window = app
         .get_window("main")
         .ok_or("Main window is unavailable.")?;
+    let previous = app.get_webview("main");
+    if let Some(previous) = &previous {
+        window_chrome::loading(previous);
+    }
     let size = window
         .inner_size()
         .map_err(|error| format!("Could not measure the dashboard: {error}"))?;
     // Replace only the dashboard document, retaining the native window, tray and geometry.
-    if let Some(previous) = app.get_webview("main") {
+    if let Some(previous) = previous {
         native_browser_platform::detach_surface(&previous)?;
         previous
             .close()
@@ -2653,7 +2667,11 @@ fn replace_main_webview(
     let document_token = app
         .state::<native_browser_bridge::NativeBrowserBridgeState>()
         .document_token();
-    let mut builder = WebviewBuilder::new("main", WebviewUrl::External(url))
+    let builder = WebviewBuilder::new("main", WebviewUrl::External(url))
+        .initialization_script(
+            initialization_script
+                .unwrap_or_else(|| window_chrome::initialization_script(None, true)),
+        )
         .on_new_window(move |url, _| {
             open_external_browser(&browser_app, &url);
             NewWindowResponse::Deny
@@ -2683,11 +2701,14 @@ fn replace_main_webview(
             }
         })
         .auto_resize();
-    if let Some(script) = initialization_script {
-        builder = builder.initialization_script(script);
-    }
     window
         .add_child(builder, LogicalPosition::new(0, 0), size)
+        .and_then(|view| {
+            #[cfg(target_os = "macos")]
+            window_chrome_macos::install_webview(&view)?;
+            window_chrome::observe_history(&view);
+            Ok(view)
+        })
         .map_err(|error| format!("Could not open the dashboard: {error}"))
 }
 
@@ -2866,6 +2887,7 @@ fn main() {
             .expect("tauri.conf.json must define the main window");
         let browser_app = app.handle().clone();
         let window = WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+            .initialization_script(window_chrome::initialization_script(None, true))
             .on_page_load(|window, payload| {
                 if let Some(webview) = window.app_handle().get_webview("main") {
                     native_browser_bridge::page_load(webview, payload, None);
@@ -2876,6 +2898,11 @@ fn main() {
                 NewWindowResponse::Deny
             })
             .build()?;
+        window_chrome::install(&window.as_ref().window())?;
+        #[cfg(target_os = "macos")]
+        if let Some(view) = app.get_webview("main") {
+            window_chrome_macos::install_webview(&view)?;
+        }
         let state = DesktopState::new(window.url()?);
         app.manage(state.clone());
         app.manage(gateway_ws::GatewayClient::new());
@@ -2959,11 +2986,22 @@ fn main() {
         quickchat_widgets::quickchat_sync_widgets,
         updater::open_release_page,
         updater::relaunch,
-        updater::updater_ready
+        updater::updater_ready,
+        #[cfg(not(target_os = "macos"))]
+        window_chrome::window_chrome_drag,
+        window_chrome::window_chrome_request
     ]);
 
     let app = builder
         .on_window_event(|window, event| {
+            if (window.label() == "main" || window.label().starts_with("gateway-"))
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)
+                )
+            {
+                window_chrome::publish(window);
+            }
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Resized(_)) {
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
