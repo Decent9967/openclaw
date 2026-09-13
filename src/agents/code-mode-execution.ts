@@ -49,6 +49,7 @@ import {
 import { runCodeModeWorker, type CodeModeWorkerInlineHost } from "./code-mode-worker.js";
 import type { AgentToolUpdateCallback } from "./runtime/index.js";
 import type { ToolResultBudget } from "./tool-result-limits.js";
+import { resolveCatalog } from "./tool-search-catalog.js";
 import { ToolSearchRuntime } from "./tool-search-runtime.js";
 import type { ToolSearchToolContext } from "./tool-search-types.js";
 import { ToolInputError } from "./tools/common.js";
@@ -126,6 +127,7 @@ export async function runCodeModeExec(params: {
           apiFiles,
           namespaceRuntime,
           config.memoryLimitBytes,
+          resolveCatalog(params.ctx),
         )
       : undefined;
     const remainingMs = budget.deadlineMs - performance.now();
