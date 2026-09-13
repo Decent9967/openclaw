@@ -761,7 +761,7 @@ describe("ensureSandboxContainer config-hash recreation", () => {
 
       expect(createCall.command).toBe(backend);
       expect(bindArgs).not.toContain(customMount);
-      expect(bindArgs).toContain(`${path.join(workspaceDir, "skills")}:/workspace/./skills:ro,z`);
+      expect(bindArgs).toContain(`${path.join(workspaceDir, "skills")}:/workspace/skills:ro,z`);
     },
   );
 
@@ -773,7 +773,7 @@ describe("ensureSandboxContainer config-hash recreation", () => {
     "uses expected main mount permissions when workspaceAccess=$workspaceAccess",
     async ({ workspaceAccess, expectedMainMount }) => {
       const workspaceDir = "/tmp/workspace";
-      const cfg = createSandboxConfig([], undefined, workspaceAccess);
+      const cfg = createSandboxConfig([], [], workspaceAccess);
 
       spawnState.inspectRunning = false;
       registryMocks.readRegistryEntry.mockResolvedValue(null);
@@ -803,7 +803,7 @@ describe("ensureSandboxContainer config-hash recreation", () => {
 
   it("uses the shared lifecycle with rootless Podman workspace ownership", async () => {
     const workspaceDir = "/tmp/workspace";
-    const cfg = createSandboxConfig([]);
+    const cfg = createSandboxConfig([], []);
     cfg.docker.user = "1001:1002";
     spawnState.inspectRunning = false;
     registryMocks.readRegistryEntry.mockResolvedValue(null);
