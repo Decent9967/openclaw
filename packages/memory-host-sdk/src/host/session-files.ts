@@ -662,26 +662,21 @@ export async function buildSessionEntry(
     !isIncognitoOpenClawAgentSqlitePath(identity.storePath, { agentId: identity.agentId })
   ) {
     const options = { ...opts, ...identity };
-    try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const redaction = captureSensitiveTextRedactionSnapshot();
-        const prepared = await prepareSessionEntryInWorker(absPath, options, redaction);
-        if (prepared.readError !== undefined) {
-          void logSessionFileReadFailure(absPath, prepared.readError);
-          return null;
-        }
-        if (redaction.registryRevision === getSecretRedactionRegistryRevision()) {
-          return prepared.entry
-            ? attachSessionEntryResetRecallCutoff(prepared.entry, prepared.resetRecallCutoff)
-            : null;
-        }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const redaction = captureSensitiveTextRedactionSnapshot();
+      const prepared = await prepareSessionEntryInWorker(absPath, options, redaction);
+      if (prepared.readError !== undefined) {
+        void logSessionFileReadFailure(absPath, prepared.readError);
+        return null;
       }
-      // Continuous secret registration cannot publish stale redaction. The rare
-      // fallback retains the original per-message registry checks and yields.
-    } catch (err) {
-      void logSessionFileReadFailure(absPath, err);
-      return null;
+      if (redaction.registryRevision === getSecretRedactionRegistryRevision()) {
+        return prepared.entry
+          ? attachSessionEntryResetRecallCutoff(prepared.entry, prepared.resetRecallCutoff)
+          : null;
+      }
     }
+    // Continuous secret registration cannot publish stale redaction. The rare
+    // fallback retains the original per-message registry checks and yields.
   }
   return buildSessionEntryInProcess(absPath, opts);
 }

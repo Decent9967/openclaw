@@ -73,6 +73,10 @@ Reset-recall metadata crosses the worker boundary with the prepared content.
 Incognito databases, archive materialization, and caller-owned transcript
 observers retain their existing local execution. Index publication and
 restoration remain with their existing database and lifecycle owners.
+Worker admission and transport failures preserve the published index and its
+retry state. The existing chunking revision triggers a one-time rebuild to repair
+previously indexed reset boundaries. Rebuilds reuse cached embeddings when
+available and retain the existing atomic publication path.
 
 The optional `tasks.async.managedFlows` creation and revision mutations use the
 same row kernels in the shared worker, with fresh owner, managed-mode, and
