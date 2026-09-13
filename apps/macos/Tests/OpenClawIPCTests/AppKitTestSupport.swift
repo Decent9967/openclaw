@@ -56,9 +56,9 @@ enum AppKitTestSupport {
             let role = String(describing: $0.accessibilityRole?())
             let title = String(describing: $0.accessibilityTitle?())
             let label = String(describing: $0.accessibilityLabel?())
-            let value = String(describing: $0.accessibilityValue?())
+            let value: Any? = $0.accessibilityValue?()
             let identifier = String(describing: $0.accessibilityIdentifier?())
-            return "role=\(role) title=\(title) label=\(label) value=\(value) identifier=\(identifier)"
+            return "role=\(role) title=\(title) label=\(label) value=\(String(describing: value)) identifier=\(identifier)"
         }.joined(separator: "\n")
         throw InteractionFailure(message: """
         The rendered window must expose \(description)
