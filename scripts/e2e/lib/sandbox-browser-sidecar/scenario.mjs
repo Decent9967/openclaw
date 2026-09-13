@@ -308,7 +308,7 @@ try {
           destination: mount.Destination,
           writable: mount.RW,
         }))
-        .sort((a, b) =>
+        .toSorted((a, b) =>
           a.destination < b.destination ? -1 : a.destination > b.destination ? 1 : 0,
         ),
     );
