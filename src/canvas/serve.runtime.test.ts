@@ -61,7 +61,13 @@ describe("core canvas document host", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toBe("text/html; charset=utf-8");
     expect(response.headers["cache-control"]).toBe("no-store");
-    expect(response.headers["content-security-policy"]).toBe("sandbox allow-scripts");
+    const csp = String(response.headers["content-security-policy"]);
+    expect(csp).toContain("sandbox allow-scripts");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("https://cdn.jsdelivr.net");
+    expect(csp).toContain("font-src data:");
+    expect(csp).toContain("connect-src 'none'");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
     expect(response.text).toBe(html);
   });
 
@@ -107,7 +113,9 @@ describe("core canvas document host", () => {
     expect(headHtml.headers["content-length"]).toBe(String(getHtml.body.byteLength));
     expect(headHtml.body.byteLength).toBe(0);
     expect(headHtml.headers["content-type"]).toBe("text/html; charset=utf-8");
-    expect(headHtml.headers["content-security-policy"]).toBe("sandbox allow-scripts");
+    expect(headHtml.headers["content-security-policy"]).toBe(
+      getHtml.headers["content-security-policy"],
+    );
 
     const getCss = await capture(cssUrl);
     const headCss = await capture(cssUrl, "HEAD");
