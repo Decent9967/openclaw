@@ -29,6 +29,8 @@ const QUIT_ID: &str = "quit";
 
 pub struct TrayHandles {
     _tray: TrayIcon<tauri::Wry>,
+    #[cfg(target_os = "linux")]
+    visible: Mutex<bool>,
     status: MenuItem<tauri::Wry>,
     status_line: Mutex<StatusLine>,
     update_action: MenuItem<tauri::Wry>,
@@ -82,6 +84,18 @@ impl StatusLine {
 }
 
 impl TrayHandles {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_visible(&self, visible: bool) {
+        let mut current = self.visible.lock().expect("tray visibility mutex poisoned");
+        if *current == visible {
+            return;
+        }
+        match self._tray.set_visible(visible) {
+            Ok(()) => *current = visible,
+            Err(error) => eprintln!("Could not change desktop tray visibility: {error}"),
+        }
+    }
+
     pub fn update(&self, snapshot: &GatewaySnapshot) {
         let mut status_line = self.status_line.lock().expect("tray status mutex poisoned");
         status_line.gateway.clone_from(&snapshot.status);
@@ -89,9 +103,7 @@ impl TrayHandles {
             status_line.pending_count = 0;
         }
         let _ = self.status.set_text(status_line.text());
-        let _ = self
-            .start
-            .set_enabled(snapshot.installed && !snapshot.running && !snapshot.reachable);
+        let _ = self.start.set_enabled(snapshot.phase == "stopped");
         let _ = self
             .stop
             .set_enabled(snapshot.installed && snapshot.running);
@@ -294,6 +306,8 @@ pub fn build(
 
     Ok(TrayHandles {
         _tray: tray,
+        #[cfg(target_os = "linux")]
+        visible: Mutex::new(true),
         status,
         status_line: Mutex::new(StatusLine {
             gateway: "Checking…".to_string(),
@@ -308,7 +322,7 @@ pub fn build(
 }
 
 pub fn show_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();

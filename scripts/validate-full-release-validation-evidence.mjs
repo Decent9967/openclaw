@@ -3,8 +3,18 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { normalizeReleaseCoveragePolicy } from "./full-release-validation-policy.mjs";
+import {
+  publicationSourceContract,
+  publicationSourceJson,
+  validatePublicationSourceBinding,
+} from "./full-release-publication-contract.mjs";
+import {
+  normalizeReleaseCoveragePolicy,
+  isSplitChangelogEvidenceDelta,
+  SPLIT_CHANGELOG_EVIDENCE_REUSE_POLICY,
+} from "./full-release-validation-policy.mjs";
 import { resolveReleaseContextIdentity } from "./lib/release-context.mjs";
+import { createReleaseEvidenceClient } from "./release-ci-summary.mjs";
 
 const FULL_RELEASE_WORKFLOW = "Full Release Validation";
 const FULL_RELEASE_WORKFLOW_PATH = ".github/workflows/full-release-validation.yml";
@@ -68,6 +78,9 @@ function displayValue(value) {
  * @property {unknown} [releaseProfile]
  * @property {unknown} [rerunGroup]
  * @property {unknown} [runReleaseSoak]
+ * @property {unknown} [sourceAdmissionContract]
+ * @property {unknown} [sourceAdmission]
+ * @property {unknown} [sourceParentRunAttempt]
  * @property {{ package?: { version?: unknown } }} [candidateBinding]
  * @property {{ coveragePolicy?: unknown, targetVersion?: unknown, targetContextRef?: unknown }} [validationInputs]
  * @property {{ changedPaths?: unknown, evidenceSha?: unknown, policy?: unknown, runId?: unknown, selectedRunId?: unknown }} [evidenceReuse]
@@ -83,6 +96,8 @@ function displayValue(value) {
  * @property {string} [expectedTrustedWorkflowFullRef]
  * @property {string} [expectedTrustedWorkflowSha]
  * @property {string} [expectedWorkflowBranch]
+ * @property {import("./full-release-publication-contract.mjs").PublicationSelection | (() => import("./full-release-publication-contract.mjs").PublicationSelection)} [expectedPublicationSelection]
+ * @property {(sha: string) => string} [getWorkflowSource]
  * @property {(sha: string) => boolean} [isTrustedMainAncestor]
  * @property {(params: { repository: string, runId: string, targetSha: string }) => StrictReleaseEvidence} [validateEvidenceReuseStrictly]
  */
@@ -130,6 +145,8 @@ export function validateFullReleaseValidationEvidence({
   expectedTrustedWorkflowFullRef,
   expectedTrustedWorkflowSha,
   expectedWorkflowBranch,
+  expectedPublicationSelection,
+  getWorkflowSource,
   isTrustedMainAncestor,
   validateEvidenceReuseStrictly,
 }) {
@@ -226,6 +243,38 @@ export function validateFullReleaseValidationEvidence({
       );
     }
   }
+  const workflowSource = getWorkflowSource
+    ? getWorkflowSource(run.headSha)
+    : createReleaseEvidenceClient(expectedRepository).getWorkflowSource(run.headSha);
+  const contract = publicationSourceContract(workflowSource);
+  if (manifest.sourceAdmissionContract !== contract) {
+    throw new Error(
+      "Publication evidence differs from its immutable source-admission workflow contract.",
+    );
+  }
+  const sourceAdmission = validatePublicationSourceBinding(manifest, {
+    sourceAdmissionContract: contract,
+    repository: expectedRepository,
+    targetSha: expectedTargetSha,
+    parentRunId: String(expectedRunId),
+  });
+  if (sourceAdmission) {
+    // Historical recovery must not acquire a new publication-selection contract.
+    const selected =
+      typeof expectedPublicationSelection === "function"
+        ? expectedPublicationSelection()
+        : expectedPublicationSelection;
+    if (
+      sourceAdmission.validationPurpose !== "publish" ||
+      (selected &&
+        publicationSourceJson(sourceAdmission.publicationSelection) !==
+          publicationSourceJson(selected))
+    ) {
+      throw new Error(
+        "New-contract nonpublish or differently selected evidence cannot prepare publication.",
+      );
+    }
+  }
 
   const pinnedMatch = PINNED_BRANCH_PATTERN.exec(run.headBranch ?? "");
   if (!pinnedMatch) {
@@ -289,11 +338,18 @@ export function validateFullReleaseValidationEvidence({
       Array.isArray(reuse.changedPaths) &&
       reuse.changedPaths.length === 1 &&
       reuse.changedPaths[0] === "CHANGELOG.md";
+    const splitChangelog =
+      reuse?.policy === SPLIT_CHANGELOG_EVIDENCE_REUSE_POLICY &&
+      reuse.evidenceSha !== expectedTargetSha &&
+      isSplitChangelogEvidenceDelta(
+        reuse.changedPaths,
+        manifest.candidateBinding?.package?.version ?? manifest.validationInputs?.targetVersion,
+      );
     if (
       !reuse ||
       typeof reuse !== "object" ||
       Array.isArray(reuse) ||
-      (!exactTarget && !changelogOnly) ||
+      (!exactTarget && !changelogOnly && !splitChangelog) ||
       !/^[1-9][0-9]*$/u.test(scalarString(reuse.runId)) ||
       !/^[1-9][0-9]*$/u.test(scalarString(reuse.selectedRunId))
     ) {

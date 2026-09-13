@@ -96,6 +96,7 @@ export function createProgressState(
       draftState.answerLane.finalized = false;
       draftState.answerLane.stream?.updatePreview(
         renderTelegramProgressDraftPreview(options.snapshot, {
+          toolProgress: progressCompositor.previewToolProgressEnabled,
           richMessages: config.telegramCfg.richMessages === true,
           maxLines: resolveChannelProgressDraftMaxLines(config.telegramCfg),
           maxLineChars: resolveChannelProgressDraftMaxLineChars(config.telegramCfg),
@@ -276,6 +277,7 @@ export async function handlePlanUpdate(
   return payload.phase === "update" && canPushToolProgress(turn)
     ? await turn.progressCompositor.pushPlanProgress(payload.steps, {
         explanation: payload.explanation,
+        explanationFormat: payload.explanationFormat,
       })
     : false;
 }

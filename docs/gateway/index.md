@@ -69,7 +69,7 @@ Gateway config reload watches the active config file path (resolved from profile
 - One always-on process for routing, control plane, and channel connections.
 - Single multiplexed port for:
   - WebSocket control/RPC
-  - HTTP APIs (`/v1/models`, `/v1/embeddings`, `/v1/chat/completions`, `/v1/responses`, `/tools/invoke`)
+  - HTTP APIs (`/v1/models`, `/v1/embeddings`, `/v1/chat/completions`, `/v1/responses`, [`/tools/invoke`](/gateway/tools-invoke-http-api))
   - Plugin HTTP routes, such as optional `/api/v1/admin/rpc`
   - Control UI and hooks
 - Default bind mode: `loopback`. Inside a detected container environment the effective default is `auto` (resolves to `0.0.0.0` for port-forwarding), unless Tailscale serve/funnel is active, which always forces `loopback`.
@@ -115,7 +115,7 @@ Gateway startup uses the same effective port and bind when it seeds local Contro
 | `off`                 | No config reload                           |
 | `hybrid` (default)    | Hot-apply when safe, restart when required |
 
-The earlier `hot` and `restart` modes are retired; [`openclaw doctor --fix`](/cli/doctor) maps both to `hybrid`.
+The earlier `hot` and `restart` modes were retired in `v2026.7.2-beta.4`, stable from `v2026.8.1`. [`openclaw doctor --fix`](/cli/doctor) maps both to `hybrid`.
 
 ## Operator command set
 
@@ -242,6 +242,18 @@ sudo loginctl enable-linger $(whoami)
 
 On a headless server without a desktop session, also make sure `XDG_RUNTIME_DIR` is set (`export XDG_RUNTIME_DIR=/run/user/$(id -u)`) before retrying `systemctl --user` commands.
 
+Service inspection preserves an explicit `DBUS_SESSION_BUS_ADDRESS` that reaches
+the user manager. Otherwise it tries `$XDG_RUNTIME_DIR/bus`, then the private
+manager socket for inspection. Install, status, and update admission reuse the
+selected route; `gateway status --deep` shows it. Update admission rechecks routes
+that timed out during earlier discovery. A socket's existence alone does
+not replace a working custom bus. If no route reaches the manager, check
+`XDG_RUNTIME_DIR`, log in once
+or enable lingering, and verify `systemctl --user status`. On Debian/Ubuntu,
+`dbus-user-session` provides the user bus; start it with
+`systemctl --user start dbus.socket` if needed. An absent unit is safe to install;
+an unreadable existing definition must be repaired by its owner first.
+
 Manual user-unit example when you need a custom install path:
 
 ```ini
@@ -249,8 +261,8 @@ Manual user-unit example when you need a custom install path:
 Description=OpenClaw Gateway
 After=network-online.target
 Wants=network-online.target
-StartLimitBurst=5
-StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 ExecStart=/usr/local/bin/openclaw gateway --port 18789
@@ -396,9 +408,10 @@ For full diagnosis ladders, use [Gateway Troubleshooting](/gateway/troubleshooti
 
 - [Configuration](/gateway/configuration)
 - [Gateway troubleshooting](/gateway/troubleshooting)
-- [Background process](/gateway/background-process)
+- [Background exec and process tool](/gateway/background-process) — the agent-facing exec and process tool, not a Gateway service control
 - [Health](/gateway/health)
 - [Doctor](/gateway/doctor)
 - [Authentication](/gateway/authentication)
 - [Remote access](/gateway/remote)
 - [Secrets management](/gateway/secrets)
+- [CLI backends](/gateway/cli-backends) — running an external CLI agent as a Gateway backend

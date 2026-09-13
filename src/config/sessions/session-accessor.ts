@@ -177,6 +177,10 @@ export {
   type SessionIdentityEvidenceResult,
 } from "./session-accessor.sqlite-entry-availability.js";
 export {
+  loadSessionEntryReadOnlyInScope,
+  updateSessionLastRouteInScope,
+} from "./session-accessor.sqlite-entry.js";
+export {
   createSessionEntryWithTranscript,
   forkSessionEntryFromParentTarget,
   forkSessionFromParentTranscript,
@@ -273,6 +277,7 @@ export {
   replaceTranscriptSuffixEventsSync,
   rewriteTranscriptEventRowsExact,
   rewriteTranscriptMessageAtAnchor,
+  rewriteAssistantTranscriptMessageForRun,
   resolveTranscriptSessionKeyBySessionId,
   trimSessionTranscriptForManualCompact,
   withTranscriptWriteLock,
@@ -290,6 +295,7 @@ export { readActiveTranscriptEntryAnchor } from "./session-accessor.sqlite-trans
 export { validateSessionTranscriptContextAdmission } from "./session-accessor.sqlite-model-context.js";
 export {
   isSessionTranscriptProjectionUnavailableError,
+  readLatestSessionTranscriptMessageEvent,
   readRecentSessionTranscriptActiveEvents,
   readSessionTranscriptActiveStats,
   readSessionTranscriptBoundedMessageTailPage,
@@ -300,6 +306,7 @@ export {
   readSessionTranscriptVisibleMessageDeltaCore,
   SessionTranscriptProjectionUnavailableError,
   waitForSessionTranscriptProjection,
+  withRecentSessionTranscriptActiveEvents,
 } from "./session-accessor.sqlite-active-events.js";
 export {
   readSessionTranscriptTitleProbeBatch,

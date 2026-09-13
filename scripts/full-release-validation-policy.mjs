@@ -3,7 +3,12 @@ import {
   validateFullReleaseCandidateBinding,
   validateFullReleaseCandidateRequest,
 } from "./full-release-candidate-contract.mjs";
+import {
+  FULL_RELEASE_SOURCE_ADMISSION_CONTRACT,
+  validatePublicationSourceBinding,
+} from "./full-release-publication-contract.mjs";
 import { hasRequiredLinuxCrossOsSuites } from "./lib/cross-os-release-checks/suite-filter.mjs";
+import { changelogEntryPath, isReleaseChangelogPath } from "./lib/release-changelog.mjs";
 import { classifyReleaseTrain, parseReleaseVersion } from "./lib/release-version.mjs";
 
 // Full profiles carry over 500 job records. Keep complete evidence under one
@@ -26,6 +31,59 @@ const MAX_MESSAGE_LENGTH = 500;
 const MAX_URL_LENGTH = 1024;
 const EXACT_TARGET_EVIDENCE_REUSE_POLICY = "exact-target-full-validation-v1";
 const CHANGELOG_ONLY_EVIDENCE_REUSE_POLICY = "changelog-only-release-v1";
+export const SPLIT_CHANGELOG_EVIDENCE_REUSE_POLICY = "split-changelog-release-v1";
+
+// A split-layout receipt is bound to one selected release, never the directory.
+// Historical root-file receipts retain their original exact-path contract.
+export function isSplitChangelogEvidenceDelta(paths, version) {
+  if (typeof version !== "string" || !version || version === "Unreleased") {
+    return false;
+  }
+  try {
+    const targetVersion = version.replace(/^v/u, "");
+    const parsedVersion = parseReleaseVersion(targetVersion);
+    // Beta release notes and contribution records use the stable base section.
+    const sectionVersion =
+      parsedVersion?.channel === "beta" && parsedVersion.version === targetVersion
+        ? parsedVersion.baseVersion
+        : version;
+    return (
+      Array.isArray(paths) &&
+      paths.length > 0 &&
+      new Set(paths).size === paths.length &&
+      paths.includes(changelogEntryPath(sectionVersion)) &&
+      paths.every((name) => isReleaseChangelogPath(name, { version: sectionVersion }))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function classifyReleaseChangelogEvidenceComparison(comparison, { baseSha, version }) {
+  const files = Array.isArray(comparison?.files) ? comparison.files : [];
+  const changedPaths = files.map((file) => file.filename);
+  const legacy = changedPaths.length === 1 && changedPaths[0] === "CHANGELOG.md";
+  const split = isSplitChangelogEvidenceDelta(changedPaths, version);
+  if (
+    comparison?.status !== "ahead" ||
+    comparison?.merge_base_commit?.sha !== baseSha ||
+    (!legacy && !split) ||
+    new Set(changedPaths).size !== changedPaths.length ||
+    files.some(
+      (file) =>
+        file.previous_filename ||
+        !(
+          split && file.filename !== "CHANGELOG.md" ? ["added", "modified"] : ["modified"]
+        ).includes(file.status),
+    )
+  ) {
+    throw new Error("changelog-only release evidence reuse failed commit comparison");
+  }
+  return {
+    changedPaths,
+    policy: split ? SPLIT_CHANGELOG_EVIDENCE_REUSE_POLICY : CHANGELOG_ONLY_EVIDENCE_REUSE_POLICY,
+  };
+}
 const REVIEWED_TELEGRAM_WAIVERS = new Set(["2026.8.1-owner-approved", "2026.9.1-owner-approved"]);
 const HARD_GH_TRANSPORT_PATTERN =
   /HTTP (?:400|401|403|404|410|422)\b|Bad credentials|authentication required|not authenticated|gh auth login|unknown (?:command|flag)|Usage: gh\b|ENOENT|EACCES/iu;
@@ -805,7 +863,13 @@ function validEvidenceReuseIdentity(evidenceReuse) {
       evidenceReuse.changedPaths.length === 0) ||
     (evidenceReuse.policy === CHANGELOG_ONLY_EVIDENCE_REUSE_POLICY &&
       evidenceReuse.changedPaths.length === 1 &&
-      evidenceReuse.changedPaths[0] === "CHANGELOG.md");
+      evidenceReuse.changedPaths[0] === "CHANGELOG.md") ||
+    (evidenceReuse.policy === SPLIT_CHANGELOG_EVIDENCE_REUSE_POLICY &&
+      isSplitChangelogEvidenceDelta(
+        evidenceReuse.changedPaths,
+        evidenceReuse.sourceManifest?.candidateBinding?.package?.version ??
+          evidenceReuse.sourceManifest?.validationInputs?.targetVersion,
+      ));
   return (
     /^[a-f0-9]{40}$/u.test(evidenceReuse.evidenceSha) &&
     /^[1-9][0-9]*$/u.test(evidenceReuse.rootRunId) &&
@@ -849,6 +913,9 @@ function releaseExecutionPlanShape(payload) {
       ...basePlanKeys,
       ...(Object.hasOwn(payload, "telegramWaiver") ? ["targetVersion", "telegramWaiver"] : []),
       ...(Object.hasOwn(payload, "coveragePolicy") ? ["targetVersion", "coveragePolicy"] : []),
+      ...(Object.hasOwn(payload, "sourceAdmissionContract")
+        ? ["sourceAdmissionContract", "sourceAdmission"]
+        : []),
     ]),
   ].toSorted((left, right) => left.localeCompare(right));
   const expectedChildKeys = hasAttemptEvidence
@@ -867,6 +934,12 @@ function releaseExecutionPlanShape(payload) {
 }
 
 function executionPlanDigestPayload(plan) {
+  const source = Object.hasOwn(plan, "sourceAdmissionContract")
+    ? {
+        sourceAdmissionContract: plan.sourceAdmissionContract,
+        sourceAdmission: plan.sourceAdmission,
+      }
+    : {};
   const waiver = Object.hasOwn(plan, "telegramWaiver")
     ? { targetVersion: plan.targetVersion, telegramWaiver: plan.telegramWaiver }
     : {};
@@ -875,6 +948,7 @@ function executionPlanDigestPayload(plan) {
     : {};
   if (!Object.hasOwn(plan, "attemptEvidenceVersion")) {
     return {
+      ...source,
       ...waiver,
       blockers: plan.blockers,
       children: plan.children,
@@ -894,6 +968,7 @@ function executionPlanDigestPayload(plan) {
     };
   }
   return {
+    ...source,
     ...waiver,
     ...coverage,
     attemptEvidenceVersion: plan.attemptEvidenceVersion,
@@ -934,6 +1009,8 @@ export function buildReleaseExecutionPlanArtifact({
   gates,
   releaseProfile,
   rerunGroup,
+  sourceAdmissionContract,
+  sourceAdmission,
   targetVersion,
   telegramWaiver,
   trustedWorkflow,
@@ -988,6 +1065,7 @@ export function buildReleaseExecutionPlanArtifact({
     }
   }
   const basePlan = {
+    ...(sourceAdmissionContract !== undefined ? { sourceAdmissionContract, sourceAdmission } : {}),
     ...(waiver ? { telegramWaiver: waiver, targetVersion } : {}),
     ...(coveragePolicy !== undefined ? { coveragePolicy, targetVersion } : {}),
     version: 1,
@@ -1006,6 +1084,7 @@ export function buildReleaseExecutionPlanArtifact({
     blockers: normalizeIssues(blockers, "release_blocker"),
     errors: normalizeIssues(errors, "orchestration_error"),
   };
+  validatePlanSourceAdmission(basePlan, expected);
   if (!attemptAware) {
     if (coveragePolicy !== undefined) {
       throw new Error("release coverage policy requires a phase-three execution plan");
@@ -1023,6 +1102,26 @@ export function buildReleaseExecutionPlanArtifact({
   };
   validateCandidatePlanBinding(plan, expected.candidateRequest);
   return { ...plan, sha256: releaseExecutionPlanSha256(plan) };
+}
+
+function validatePlanSourceAdmission(plan, expected) {
+  // Failed resolution still seals an honest failure plan, never successful source evidence.
+  if (
+    plan.sourceAdmissionContract === FULL_RELEASE_SOURCE_ADMISSION_CONTRACT &&
+    plan.sourceAdmission === null &&
+    plan.gates.some(
+      (gate) => gate.name === "Resolve target ref" && gate.required && gate.result !== "success",
+    )
+  ) {
+    if (
+      expected.sourceAdmissionContract !== undefined &&
+      expected.sourceAdmissionContract !== plan.sourceAdmissionContract
+    ) {
+      throw new Error("source admission contract mismatch");
+    }
+    return;
+  }
+  validatePublicationSourceBinding(plan, expected);
 }
 
 function validateCandidatePlanBinding(plan, expectedCandidateRequest) {
@@ -1065,6 +1164,7 @@ export function validateReleaseExecutionPlanArtifact(payload, expected = {}) {
     throw new Error("release execution plan artifact is invalid");
   }
   const shape = releaseExecutionPlanShape(payload);
+  validatePlanSourceAdmission(payload, expected);
   const sha256 = releaseExecutionPlanSha256(payload);
   if (payload.sha256 !== sha256) {
     throw new Error("release execution plan artifact digest is invalid");

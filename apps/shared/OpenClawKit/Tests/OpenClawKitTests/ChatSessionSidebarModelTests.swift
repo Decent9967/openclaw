@@ -9,6 +9,7 @@ struct ChatSessionSidebarModelTests {
         key: String,
         displayName: String? = nil,
         label: String? = nil,
+        autoLabel: String? = nil,
         subject: String? = nil,
         sessionId: String? = nil,
         updatedAt: Double? = nil,
@@ -51,6 +52,7 @@ struct ChatSessionSidebarModelTests {
             model: nil,
             contextTokens: nil,
             label: label,
+            autoLabel: autoLabel,
             category: category,
             pinned: pinned,
             pinnedAt: pinnedAt,
@@ -229,11 +231,14 @@ struct ChatSessionSidebarModelTests {
     }
 
     @Test func `agent scope keeps active agent and unprefixed sessions`() {
+        var foreignGlobal = self.entry(key: "global", updatedAt: 250)
+        foreignGlobal.agentId = "other"
         let sections = ChatSessionSidebarModel.sections(
             sessions: [
                 self.entry(key: "agent:ops:main", updatedAt: 400),
                 self.entry(key: "agent:ops:deploy", updatedAt: 300),
                 self.entry(key: "agent:other:private", updatedAt: 200),
+                foreignGlobal,
                 self.entry(key: "global-tool", updatedAt: 100),
             ],
             currentSessionKey: "main",
@@ -275,7 +280,7 @@ struct ChatSessionSidebarModelTests {
         #expect(sections.flatMap(\.nodes).map(\.session.key) == ["agent:ops:child"])
     }
 
-    @Test func `global aliases select their agent wrapped row`() {
+    @Test func `bare global stays distinct from an ordinary qualified global row`() {
         let sessions = [
             self.entry(key: "global", updatedAt: 200),
             self.entry(key: "agent:ops:global", updatedAt: 100, archived: true),
@@ -291,8 +296,8 @@ struct ChatSessionSidebarModelTests {
             sessions: sessions,
             currentSessionKey: "global",
             mainSessionKey: "agent:main:main",
-            activeAgentID: "ops") == "agent:ops:global")
-        #expect(sections.flatMap(\.nodes).map(\.session.key) == ["agent:ops:global"])
+            activeAgentID: "ops") == "global")
+        #expect(sections.flatMap(\.nodes).map(\.session.key) == ["global"])
     }
 
     @Test func `query filters on display name and key`() {
@@ -366,6 +371,40 @@ struct ChatSessionSidebarModelTests {
 
         let unnamed = self.entry(key: "agent:main:x")
         #expect(ChatSessionSidebarModel.displayName(for: unnamed) == "x")
+
+        let androidStamp = self.entry(
+            key: "agent:main:node-1234567890ab",
+            displayName: "Generated title",
+            autoLabel: "OpenClaw App · Pixel · 1234567890ab")
+        #expect(ChatSessionSidebarModel.displayName(for: androidStamp) == "Generated title")
+        let unnamedAndroidSession = self.entry(
+            key: "agent:main:node-1234567890ab",
+            autoLabel: "OpenClaw App · Pixel · 1234567890ab")
+        #expect(
+            ChatSessionSidebarModel.displayName(for: unnamedAndroidSession)
+                == "OpenClaw App · Pixel · 1234567890ab")
+
+        for label in [
+            "OpenClaw App",
+            "OpenClaw App · 1234567890ab",
+            "OpenClaw App · Pixel · 1234567890ab",
+            "OpenClaw App · Release planning · 1234567890ab",
+        ] {
+            let manuallyNamed = self.entry(
+                key: "agent:main:node-1234567890ab",
+                displayName: "Generated title",
+                label: label,
+                autoLabel: "OpenClaw App · Pixel · 1234567890ab")
+            #expect(ChatSessionSidebarModel.displayName(for: manuallyNamed) == label)
+        }
+
+        let manualPrefix = self.entry(
+            key: "agent:main:dashboard:fresh",
+            displayName: "Generated title",
+            label: "OpenClaw App · Release planning")
+        #expect(
+            ChatSessionSidebarModel.displayName(for: manualPrefix)
+                == "OpenClaw App · Release planning")
     }
 
     @Test func `delete excludes main aliases and allows ordinary or selected global sessions`() {
@@ -845,7 +884,9 @@ struct ChatSessionSidebarModelTests {
 
         let omitted = try decoder.decode(
             OpenClawChatSessionsChangedEvent.self,
-            from: Data(#"{"reason":"run-progress","session":{"key":"agent:main:work","updatedAt":200,"hasActiveRun":true}}"#.utf8))
+            from: Data(
+                #"{"reason":"run-progress","session":{"key":"agent:main:work","updatedAt":200,"hasActiveRun":true}}"#
+                    .utf8))
         let retained = try #require(ChatSessionSidebarModel.applying(
             sessionChange: omitted,
             to: [existing]))
@@ -853,7 +894,9 @@ struct ChatSessionSidebarModelTests {
 
         let tombstoned = try decoder.decode(
             OpenClawChatSessionsChangedEvent.self,
-            from: Data(#"{"reason":"run-progress","session":{"key":"agent:main:work","updatedAt":300,"hasActiveRun":true,"activeRunIds":null}}"#.utf8))
+            from: Data(
+                #"{"reason":"run-progress","session":{"key":"agent:main:work","updatedAt":300,"hasActiveRun":true,"activeRunIds":null}}"#
+                    .utf8))
         let cleared = try #require(ChatSessionSidebarModel.applying(
             sessionChange: tombstoned,
             to: retained))
