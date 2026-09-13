@@ -113,6 +113,24 @@ export function createManagedHandoffLeaseStore(
     let value: string | undefined;
     if (process.platform === "linux") {
       value = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    } else if (process.platform === "freebsd") {
+      // kern.boot_id is 16 random bytes fixed for this boot; kern.boottime changes
+      // when the wall clock steps and cannot prove a foreground lease has expired.
+      const result = spawnSync("/sbin/sysctl", ["-b", "kern.boot_id"], {
+        env: serviceManagerEnv,
+        timeout: 1000,
+        maxBuffer: 16,
+        killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      if (
+        !result.error &&
+        result.status === 0 &&
+        Buffer.isBuffer(result.stdout) &&
+        result.stdout.length === 16
+      ) {
+        value = result.stdout.toString("hex");
+      }
     } else if (process.platform === "darwin" || process.platform === "win32") {
       const windows = process.platform === "win32";
       const result = control(
