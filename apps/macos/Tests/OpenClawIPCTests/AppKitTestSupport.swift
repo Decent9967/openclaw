@@ -72,21 +72,35 @@ enum AppKitTestSupport {
 
     static func pressMenu(
         _ button: AnyObject,
+        file: StaticString = #fileID,
+        line: UInt = #line,
         inspect: @escaping (NSMenu) throws -> Void) throws
     {
         let tracking = AppKitTestMenuTracking(inspect: inspect)
         tracking.start()
         defer { tracking.stop() }
-        guard button.accessibilityPerformPress?() == true else {
-            throw InteractionFailure(message: "The rendered control rejected the accessibility press")
-        }
-        guard tracking.observed else {
-            throw InteractionFailure(message: "Pressing the rendered control must open its native menu")
-        }
-        guard !tracking.timedOut else {
-            throw InteractionFailure(message: "The menu must finish before its tracking deadline")
+        let pressed = button.accessibilityPerformPress?()
+        let completed = tracking.observed && tracking.inspectionCompleted && !tracking.timedOut
+        if pressed != true || !completed || tracking.error != nil {
+            let role: NSAccessibility.Role? = button.accessibilityRole?()
+            let identifier: String? = button.accessibilityIdentifier?()
+            let label: String? = button.accessibilityLabel?()
+            let title: String? = button.accessibilityTitle?()
+            let enabled: Bool? = button.isAccessibilityEnabled?()
+            let window = button.accessibilityWindow?() as? NSWindow
+            let diagnostics = """
+            Menu interaction at \(file):\(line)
+            pressed=\(String(describing: pressed)) observed=\(tracking.observed) inspected=\(tracking.inspectionCompleted) timedOut=\(tracking.timedOut) error=\(String(describing: tracking.error))
+            control=\(String(reflecting: type(of: button))) role=\(String(describing: role)) identifier=\(String(describing: identifier)) label=\(String(describing: label)) title=\(String(describing: title)) enabled=\(String(describing: enabled))
+            appActive=\(NSApp.isActive) window=\(String(describing: window?.title)) visible=\(String(describing: window?.isVisible)) key=\(String(describing: window?.isKeyWindow))
+            """
+            print(diagnostics)
         }
         if let error = tracking.error { throw error }
+        // The inspection cancels tracking; its completion matters, not popup selection.
+        guard completed else {
+            throw InteractionFailure(message: "The native menu inspection must complete before its tracking deadline")
+        }
     }
 
     private struct InteractionFailure: LocalizedError {
@@ -101,6 +115,7 @@ enum AppKitTestSupport {
 private final class AppKitTestMenuTracking: NSObject {
     let inspect: (NSMenu) throws -> Void
     private(set) var observed = false
+    private(set) var inspectionCompleted = false
     private(set) var timedOut = false
     private(set) var error: Error?
     private var menu: NSMenu?
@@ -144,7 +159,10 @@ private final class AppKitTestMenuTracking: NSObject {
 
     @objc private func inspectMenu() {
         guard let menu = self.menu else { return }
-        defer { menu.cancelTrackingWithoutAnimation() }
+        defer {
+            self.inspectionCompleted = true
+            menu.cancelTrackingWithoutAnimation()
+        }
         do { try self.inspect(menu) } catch { self.error = error }
     }
 
