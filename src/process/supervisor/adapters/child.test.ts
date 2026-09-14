@@ -1054,3 +1054,38 @@ describe("createChildAdapter", () => {
     expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
   });
 });
+
+
+describe("post-exit drain settlement for detached grandchildren", () => {
+  const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const setPlatform = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, "platform", { configurable: true, value: platform });
+  };
+  afterEach(() => {
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, "platform", originalPlatformDescriptor);
+    }
+  });
+
+  it("caps the drain when detached grandchildren hold stdio after the root exits", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    const wait = adapter.wait();
+    void wait.then(settled);
+
+    // Root exits while a detached grandchild keeps stdout open (no end/close).
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled();
+
+    // The bounded post-exit drain cap settles instead of waiting forever.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+});

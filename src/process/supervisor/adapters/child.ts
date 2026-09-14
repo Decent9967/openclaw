@@ -32,6 +32,7 @@ import { createProcessAdapterEvents } from "./process-events.js";
 
 const FORCE_KILL_WAIT_FALLBACK_MS = 4000;
 const FORCED_WINDOWS_CLOSE_SETTLE_MS = 250;
+const POST_EXIT_CLOSE_SETTLE_MS = 250;
 const WINDOWS_PACKAGE_MANAGER_SHIMS = ["npm", "pnpm", "yarn", "npx"] as const;
 
 function resolveChildInvocation(params: {
@@ -262,6 +263,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
   let processClosed = false;
   let forceKillWaitFallbackTimer: NodeJS.Timeout | null = null;
   let forcedWindowsCloseTimer: NodeJS.Timeout | null = null;
+  let postExitCloseSettlementTimer: NodeJS.Timeout | null = null;
   let hardKillRequested = false;
   let windowsTreeKillCompleted = false;
   let childExitState: { code: number | null; signal: NodeJS.Signals | null } | null = null;
@@ -287,6 +289,14 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     forcedWindowsCloseTimer = null;
   };
 
+  const clearPostExitCloseSettlement = () => {
+    if (!postExitCloseSettlementTimer) {
+      return;
+    }
+    clearTimeout(postExitCloseSettlementTimer);
+    postExitCloseSettlementTimer = null;
+  };
+
   const settleWait = (value: { code: number | null; signal: NodeJS.Signals | null }) => {
     if (waitSettled) {
       return;
@@ -294,6 +304,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     waitSettled = true;
     clearForceKillWaitFallback();
     clearForcedWindowsCloseTimer();
+    clearPostExitCloseSettlement();
     completion.resolve(value);
   };
 
@@ -310,6 +321,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     waitSettled = true;
     clearForceKillWaitFallback();
     clearForcedWindowsCloseTimer();
+    clearPostExitCloseSettlement();
     completion.reject(error);
   };
 
@@ -353,6 +365,30 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
       settleWait(resolveObservedExitState(exitState));
     }, FORCED_WINDOWS_CLOSE_SETTLE_MS);
     forcedWindowsCloseTimer.unref?.();
+  };
+
+  const schedulePostExitCloseSettlement = () => {
+    if (
+      process.platform === "win32" ||
+      postExitCloseSettlementTimer ||
+      childExitState == null ||
+      workerIpcDisconnected ||
+      (stdoutDrained && stderrDrained)
+    ) {
+      return;
+    }
+    // A detached grandchild can inherit the child's stdio handles and hold
+    // them open long after the root command exits (e.g. `nohup sleep 600 |
+    // cat &`). The run's outcome is already determined by the root's exit;
+    // cap the drain window so the session settles instead of waiting on a
+    // pipe we do not own. (#147304)
+    postExitCloseSettlementTimer = setTimeout(() => {
+      postExitCloseSettlementTimer = null;
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      settleObservedClose(resolveObservedExitState(childExitState));
+    }, POST_EXIT_CLOSE_SETTLE_MS);
+    postExitCloseSettlementTimer.unref?.();
   };
 
   const isWindowsHardKillSettlementBlocked = () =>
@@ -418,6 +454,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     childExitState = { code, signal };
     events.emitExit(code, signal);
     scheduleForcedWindowsCloseSettlement();
+    schedulePostExitCloseSettlement();
     maybeSettleAfterExit();
   });
   child.once("close", (code, signal) => {
