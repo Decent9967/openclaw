@@ -1642,6 +1642,54 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     });
   });
 
+  it("honors agents.defaults.blockStreamingDefault when the channel leaves blocks unset and no preview can render", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        // raw render mode cannot host a streaming preview card, so blocks are
+        // the only channel for mid-turn text in this reply.
+        renderMode: "raw",
+        streaming: { mode: "partial" },
+      },
+    });
+
+    const result = createFeishuReplyDispatcher({
+      cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
+      agentId: "agent",
+      runtime: {} as never,
+      chatId: "oc_chat",
+      sendTarget: "oc_chat",
+    });
+
+    expect(result.replyOptions).toHaveProperty("disableBlockStreaming", false);
+  });
+
+  it("keeps blocks off when the explicit preview mode wins over the agent default", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "auto",
+        streaming: { mode: "partial" },
+      },
+    });
+
+    const result = createFeishuReplyDispatcher({
+      cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
+      agentId: "agent",
+      runtime: {} as never,
+      chatId: "oc_chat",
+      sendTarget: "oc_chat",
+    });
+
+    expect(result.replyOptions).toHaveProperty("disableBlockStreaming", true);
+  });
+
   it("keeps core block streaming disabled when Feishu blockStreaming is explicitly false", async () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",

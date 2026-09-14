@@ -294,7 +294,16 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   // A preview exists before modifying hooks accept the logical payload, so suppress all eager
   // CardKit activity whenever either hook could rewrite or cancel the eventual send.
   const previewStreamingEnabled = streamingEnabled && !modifyingHooksRegistered;
-  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
+  // Match the Telegram dispatch path (bot-message-dispatch-draft.ts): pass the
+  // streaming policy so an unset channels.feishu.streaming.block follows the
+  // agent-level blockStreamingDefault instead of being hard-disabled, while an
+  // explicit channel choice still wins. Blocks then cover replies where no
+  // preview card can render (mention-required groups, raw render mode,
+  // modifying hooks).
+  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config, {
+    previewAvailable: previewStreamingEnabled,
+    blockStreamingDefault: cfg.agents?.defaults?.blockStreamingDefault,
+  });
   const coreBlockStreamingEnabled = blockStreamingEnabled === true;
   const reasoningPreviewEnabled = previewStreamingEnabled && params.allowReasoningPreview === true;
 
@@ -1646,8 +1655,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     delivery,
     replyOptions: {
       onModelSelected,
-      disableBlockStreaming:
-        typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : true,
+      disableBlockStreaming: !blockStreamingEnabled,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {
