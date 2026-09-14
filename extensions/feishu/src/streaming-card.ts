@@ -591,20 +591,23 @@ export class FeishuStreamingSession {
     await this.flushPendingUpdate();
   }
 
-  // Same write path as update(), but resolves only after a flush cycle has
-  // attempted this exact text. Callers that cache a publication as rendered
-  // (the progress-draft compositor) must use this so a rejected content write
-  // reports false and identical retries stay alive; update() remains
-  // fire-and-forget for streaming text partials.
-  async updateConfirmed(text: string): Promise<boolean> {
-    if (!this.state || this.closed || !text) {
-      return false;
+  // Resolves with confirmed transport acceptance for an already-submitted
+  // text without writing again, so publication caching upstream (the
+  // progress-draft compositor) never advances on a write the card API
+  // rejected. Callers observe after update(); the waiter settles at the flush
+  // cycle that attempts the text, and a superseded snapshot resolves false so
+  // the compositor can re-publish from its own dedupe state.
+  observeContentAcceptance(text: string): Promise<boolean> {
+    if (!this.state || this.closed) {
+      return Promise.resolve(false);
     }
-    const settled = new Promise<boolean>((resolve) => {
+    if (this.pendingText === null) {
+      // Nothing is pending: the latest flush already attempted this text.
+      return Promise.resolve(this.state.sentText === text);
+    }
+    return new Promise<boolean>((resolve) => {
       this.contentFlushWaiters.push({ text, resolve });
     });
-    await this.update(text);
-    return await settled;
   }
 
   private async updateNoteContent(note: string): Promise<void> {

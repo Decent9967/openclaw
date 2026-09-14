@@ -14,7 +14,7 @@ type StreamingSessionStub = {
   credentials: unknown;
   start: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
-  updateConfirmed: ReturnType<typeof vi.fn>;
+  observeContentAcceptance: ReturnType<typeof vi.fn>;
   closeWithResult: Mock<FeishuStreamingSession["closeWithResult"]>;
   discard: Mock<FeishuStreamingSession["discard"]>;
   isActive: ReturnType<typeof vi.fn>;
@@ -140,10 +140,7 @@ vi.mock("./streaming-card.js", () => {
         this.active = true;
       });
       update = vi.fn(async () => {});
-      updateConfirmed = vi.fn(async (text: string): Promise<boolean> => {
-        await this.update(text);
-        return true;
-      });
+      observeContentAcceptance = vi.fn(async (): Promise<boolean> => true);
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
         return {
@@ -4676,16 +4673,16 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       const { result } = createDispatcherHarness();
       await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
       const session = requireStreamingInstance(0);
-      await vi.waitFor(() => expect(session.updateConfirmed).toHaveBeenCalled());
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
 
-      session.updateConfirmed.mockResolvedValueOnce(false);
+      session.observeContentAcceptance.mockResolvedValueOnce(false);
       const acknowledged = await result.replyOptions.onToolStart?.({
         name: "web_search",
         phase: "start",
         args: { query: "openclaw" },
       });
       expect(acknowledged).toBe(false);
-      const rejectedText = session.updateConfirmed.mock.calls.at(-1)?.[0];
+      const rejectedText = session.observeContentAcceptance.mock.calls.at(-1)?.[0];
 
       // The rejected publication must stay unacknowledged, so the identical
       // event republishes the same draft instead of being deduped away.
@@ -4695,14 +4692,37 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
         args: { query: "openclaw" },
       });
       expect(retried).toBe(true);
-      expect(session.updateConfirmed.mock.calls.at(-1)?.[0]).toBe(rejectedText);
+      expect(session.observeContentAcceptance.mock.calls.at(-1)?.[0]).toBe(rejectedText);
+    });
+
+    it("coalesces rapid publications without serializing confirmation waits", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+      session.update.mockClear();
+      session.observeContentAcceptance.mockClear();
+
+      // A burst of publications: each write enters the session's pendingText
+      // snapshot slot immediately — the queue never waits for one snapshot's
+      // confirmed write before accepting the next.
+      await Promise.all([
+        result.replyOptions.onToolStart?.({ name: "web_search", phase: "start" }),
+        result.replyOptions.onToolStart?.({ name: "tavily", phase: "start" }),
+        result.replyOptions.onToolStart?.({ name: "exec", phase: "start" }),
+      ]);
+
+      expect(session.observeContentAcceptance).toHaveBeenCalledTimes(3);
+      expect(session.update.mock.calls.at(-1)?.[0]).toBe(
+        session.observeContentAcceptance.mock.calls.at(-1)?.[0],
+      );
     });
 
     it("drops silent NO_REPLY preambles instead of rendering a commentary line", async () => {
       const { result } = createDispatcherHarness();
       await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
       const session = requireStreamingInstance(0);
-      await vi.waitFor(() => expect(session.updateConfirmed).toHaveBeenCalled());
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
 
       const handled = await result.replyOptions.onItemEvent?.({
         kind: "preamble",
@@ -4711,7 +4731,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
         progressText: "NO_REPLY",
       });
       expect(handled).toBe(false);
-      for (const call of session.updateConfirmed.mock.calls) {
+      for (const call of session.update.mock.calls) {
         expect(String(call?.[0])).not.toContain("NO_REPLY");
       }
     });

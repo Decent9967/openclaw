@@ -163,6 +163,7 @@ export type {
   ChannelProgressDraftCompositorLine,
   ChannelProgressDraftCompositorSnapshot,
 } from "../channels/progress-draft-compositor.js";
+export type { ChannelProgressDraftLine } from "../channels/streaming.js";
 export { deriveDurableFinalDeliveryRequirements } from "../channels/message/capabilities.js";
 export { defineChannelMessageAdapter } from "../channels/message/adapter.js";
 export { createChannelMessageAdapterFromOutbound } from "../channels/message/outbound-bridge.js";

@@ -400,25 +400,35 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     const session = streaming;
     const generation = activeStreamingGeneration;
     const startPromise = streamingStartPromise;
-    const updateAccepted = partialUpdateQueue.then(async () => {
+    // The serialization chain carries only the write itself: update() parks
+    // the snapshot in the session's pendingText and returns, so rapid
+    // snapshots coalesce to the latest one instead of each waiting out a
+    // full throttle window (or a confirmed write) inside the chain.
+    const chained = partialUpdateQueue.then(async () => {
       if (startPromise) {
         await startPromise;
       }
       // Updates queued before close owns the captured session; updates queued after the
       // generation is sealed have no owner and cannot race provider finalization.
       if (generation !== undefined && session?.isActive()) {
-        // Confirmed acceptance: a rejected content write must report false so
-        // the compositor keeps the publication unacknowledged and retries.
-        return await session.updateConfirmed(combined);
+        await session.update(combined);
       }
-      return false;
     });
     // The chain must tolerate a failed task; callers get false, not a rejection.
-    partialUpdateQueue = updateAccepted.then(
+    partialUpdateQueue = chained.then(
       () => undefined,
       () => undefined,
     );
-    return updateAccepted;
+    // Acceptance is observed off the chain: it resolves once a flush cycle
+    // attempts this exact text, so a rejected write reports false and the
+    // compositor keeps the publication unacknowledged — without delaying the
+    // next snapshot behind that observation.
+    return chained.then(async () => {
+      if (generation === undefined || !session?.isActive()) {
+        return false;
+      }
+      return await session.observeContentAcceptance(combined);
+    });
   };
 
   const queueStreamingUpdate = (

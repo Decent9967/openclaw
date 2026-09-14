@@ -716,7 +716,7 @@ describe("FeishuStreamingSession", () => {
     ]);
   });
 
-  it("resolves updateConfirmed false after a rejected write and keeps the text retryable", async () => {
+  it("observes a rejected write as unaccepted and keeps the text retryable", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_500);
     const updateBodies: string[] = [];
@@ -759,20 +759,24 @@ describe("FeishuStreamingSession", () => {
 
     // Outside the throttle window so the write is attempted at once.
     vi.setSystemTime(2_000);
-    const rejected = session.updateConfirmed("draft A");
+    const write = session.update("draft A");
+    const observed = session.observeContentAcceptance("draft A");
     await vi.advanceTimersByTimeAsync(0);
-    await expect(rejected).resolves.toBe(false);
+    await write;
+    await expect(observed).resolves.toBe(false);
     expect(updateBodies).toHaveLength(1);
 
     // The caller-driven retry of the identical text is what proves the
     // rejection was not cached as rendered.
-    const retry = session.updateConfirmed("draft A");
+    const retryWrite = session.update("draft A");
+    const retryObserved = session.observeContentAcceptance("draft A");
     await vi.advanceTimersByTimeAsync(200);
-    await expect(retry).resolves.toBe(true);
+    await retryWrite;
+    await expect(retryObserved).resolves.toBe(true);
     expect(updateBodies.map((body) => JSON.parse(body).content)).toEqual(["draft A", "draft A"]);
   });
 
-  it("resolves updateConfirmed true once the throttled flush lands", async () => {
+  it("resolves observed acceptance true once the throttled flush lands", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const updateBodies: string[] = [];
@@ -795,13 +799,15 @@ describe("FeishuStreamingSession", () => {
       lastUpdateTime: 1_000,
     });
 
-    const confirmed = session.updateConfirmed("throttled draft");
+    const write = session.update("throttled draft");
+    const observed = session.observeContentAcceptance("throttled draft");
     await vi.advanceTimersByTimeAsync(200);
-    await expect(confirmed).resolves.toBe(true);
+    await write;
+    await expect(observed).resolves.toBe(true);
     expect(updateBodies.map((body) => JSON.parse(body).content)).toEqual(["throttled draft"]);
   });
 
-  it("resolves a pending confirmed update as unacknowledged after close", async () => {
+  it("resolves a pending acceptance observation as unacknowledged after close", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const updateBodies: string[] = [];
@@ -824,9 +830,53 @@ describe("FeishuStreamingSession", () => {
       lastUpdateTime: 1_000,
     });
 
-    const confirmed = session.updateConfirmed("never lands");
+    const write = session.update("never lands");
+    const observed = session.observeContentAcceptance("never lands");
     await session.closeWithResult("final answer");
-    await expect(confirmed).resolves.toBe(false);
+    await write;
+    await expect(observed).resolves.toBe(false);
+  });
+
+  it("coalesces a snapshot burst into one write and confirms each observer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const updateBodies: string[] = [];
+    const deps = mockFetches(updateBodies);
+    const session = new FeishuStreamingSession(
+      {} as never,
+      { appId: "app_observed_burst", appSecret: "secret" },
+      undefined,
+      deps,
+    );
+    setStreamingSessionInternals(session, {
+      state: {
+        cardId: "card_observed_burst",
+        messageId: "om_observed_burst",
+        sequence: 1,
+        currentText: "seed",
+        sentText: "seed",
+        hasNote: false,
+      },
+      lastUpdateTime: 1_000,
+    });
+
+    // Rapid snapshots all land inside one throttle window; only the latest
+    // reaches the card, while every observer still learns its own outcome.
+    const writes = [
+      session.update("snapshot one"),
+      session.update("snapshot two"),
+      session.update("snapshot three"),
+    ];
+    const first = session.observeContentAcceptance("snapshot one");
+    const second = session.observeContentAcceptance("snapshot two");
+    const third = session.observeContentAcceptance("snapshot three");
+    await vi.advanceTimersByTimeAsync(200);
+    await Promise.all(writes);
+    await expect(third).resolves.toBe(true);
+    await expect(second).resolves.toBe(false);
+    await expect(first).resolves.toBe(false);
+    expect(updateBodies).toHaveLength(1);
+    expect(JSON.parse(updateBodies[0] ?? "{}").content).toBe("snapshot three");
   });
 
   it("pushes natural-boundary updates immediately inside the throttle window", async () => {
