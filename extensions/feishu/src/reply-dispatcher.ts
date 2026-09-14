@@ -396,20 +396,29 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     return parts.join("");
   };
 
-  const flushStreamingCardUpdate = (combined: string) => {
+  const flushStreamingCardUpdate = (combined: string): Promise<boolean> => {
     const session = streaming;
     const generation = activeStreamingGeneration;
     const startPromise = streamingStartPromise;
-    partialUpdateQueue = partialUpdateQueue.then(async () => {
+    const updateAccepted = partialUpdateQueue.then(async () => {
       if (startPromise) {
         await startPromise;
       }
       // Updates queued before close owns the captured session; updates queued after the
       // generation is sealed have no owner and cannot race provider finalization.
       if (generation !== undefined && session?.isActive()) {
-        await session.update(combined);
+        // Confirmed acceptance: a rejected content write must report false so
+        // the compositor keeps the publication unacknowledged and retries.
+        return await session.updateConfirmed(combined);
       }
+      return false;
     });
+    // The chain must tolerate a failed task; callers get false, not a rejection.
+    partialUpdateQueue = updateAccepted.then(
+      () => undefined,
+      () => undefined,
+    );
+    return updateAccepted;
   };
 
   const queueStreamingUpdate = (
@@ -766,22 +775,18 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     mode: streamMode,
     active: previewStreamingEnabled,
     seed: `${account.accountId}:${sendTarget}`,
+    // Narration preambles flow through the shared commentary lane; the 💬 lane
+    // marker is this channel's presentation choice for it.
+    commentaryLinePrefix: "💬 ",
     update: async (draftText, options) => {
       statusLine = draftText;
       progressDraftLabel = options.snapshot.label;
       startStreaming();
-      // Only acknowledge once CardKit creation actually settled: an
-      // acknowledged publication is cached as rendered, so reporting success
-      // while the start promise is pending would swallow identical retries
-      // after a failed startup (and its backoff window).
-      if (streamingStartPromise) {
-        await streamingStartPromise;
-      }
-      if (!streaming?.isActive()) {
-        return false;
-      }
-      flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
-      return true;
+      // Acceptance comes from the transport itself: flush awaits CardKit
+      // creation settling and the confirmed content write. An acknowledged
+      // publication is cached as rendered, so a rejected write must return
+      // false to keep identical retries alive.
+      return await flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
     },
     deleteCurrent: async () => {
       statusLine = "";
@@ -1761,24 +1766,14 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }) => {
             if (payload.kind === "preamble") {
               // Narration text the model authors between tool calls. The shared
-              // headline lane is progress-mode only, so in partial mode render it
-              // as a stable 💬 line in the rolling draft instead: process text
-              // stays visually separate from the final answer.
-              const text = payload.progressText?.trim();
-              if (!text) {
-                return false;
-              }
-              return progressCompositor.pushToolProgress(
-                {
-                  ...(payload.itemId ? { id: `commentary:${payload.itemId}` } : {}),
-                  kind: "item",
-                  icon: "💬",
-                  label: "",
-                  detail: text,
-                  prefix: false,
-                },
-                { startImmediately: true },
-              );
+              // commentary lane owns its semantics end to end — progress-status
+              // sanitization (NO_REPLY/directives stripped), cumulative
+              // identity for id-less snapshot streams, and keyed retraction on
+              // an empty update — so partial mode delegates instead of
+              // rebuilding a parallel 💬 line here.
+              return progressCompositor.pushCommentaryProgress(payload.progressText, {
+                itemId: payload.itemId,
+              });
             }
             return progressCompositor.pushItemEvent(payload);
           }

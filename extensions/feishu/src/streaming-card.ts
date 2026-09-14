@@ -256,6 +256,10 @@ export class FeishuStreamingSession {
   private log?: (msg: string) => void;
   private lastUpdateTime = 0;
   private pendingText: string | null = null;
+  // Resolves with confirmed transport acceptance once a flush cycle attempts
+  // the exact text; publication caching upstream must never advance on a
+  // write the card API rejected.
+  private contentFlushWaiters: Array<{ text: string; resolve: (ok: boolean) => void }> = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private updateThrottleMs = STREAMING_UPDATE_THROTTLE_MS;
   private fetchImpl?: FeishuStreamingFetch;
@@ -530,25 +534,41 @@ export class FeishuStreamingSession {
 
   private async flushPendingUpdate(): Promise<void> {
     this.queue = this.queue.then(async () => {
-      if (!this.state || this.closed) {
-        return;
-      }
-      const nextText = this.pendingText;
-      if (!nextText) {
-        return;
-      }
-      this.pendingText = null;
-      if (nextText === this.state.sentText) {
-        return;
-      }
-      const sent = await this.updateCardContent(nextText, (e) =>
-        this.log?.(`Update failed: ${String(e)}`),
-      );
-      if (sent && this.state) {
-        this.state.sentText = nextText;
+      try {
+        if (!this.state || this.closed) {
+          return;
+        }
+        const nextText = this.pendingText;
+        if (!nextText) {
+          return;
+        }
+        this.pendingText = null;
+        if (nextText === this.state.sentText) {
+          return;
+        }
+        const sent = await this.updateCardContent(nextText, (e) =>
+          this.log?.(`Update failed: ${String(e)}`),
+        );
+        if (sent && this.state) {
+          this.state.sentText = nextText;
+        } else if (!sent && this.state && !this.closed) {
+          // A rejected write must not lose the text: keep it pending so the
+          // next update retries it. Retries stay caller-driven — a rejected
+          // write self-rescheduling here would retry-loop against an outage.
+          this.pendingText = this.pendingText ?? nextText;
+        }
+      } finally {
+        this.settleContentFlushWaiters();
       }
     });
     await this.queue;
+  }
+
+  private settleContentFlushWaiters(): void {
+    const sentText = this.state?.sentText ?? "";
+    for (const waiter of this.contentFlushWaiters.splice(0)) {
+      waiter.resolve(this.closed ? false : sentText === waiter.text);
+    }
   }
 
   async update(text: string): Promise<void> {
@@ -569,6 +589,22 @@ export class FeishuStreamingSession {
     }
     this.lastUpdateTime = now;
     await this.flushPendingUpdate();
+  }
+
+  // Same write path as update(), but resolves only after a flush cycle has
+  // attempted this exact text. Callers that cache a publication as rendered
+  // (the progress-draft compositor) must use this so a rejected content write
+  // reports false and identical retries stay alive; update() remains
+  // fire-and-forget for streaming text partials.
+  async updateConfirmed(text: string): Promise<boolean> {
+    if (!this.state || this.closed || !text) {
+      return false;
+    }
+    const settled = new Promise<boolean>((resolve) => {
+      this.contentFlushWaiters.push({ text, resolve });
+    });
+    await this.update(text);
+    return await settled;
   }
 
   private async updateNoteContent(note: string): Promise<void> {
@@ -625,6 +661,7 @@ export class FeishuStreamingSession {
     this.closed = true;
     this.clearFlushTimer();
     await this.queue;
+    this.settleContentFlushWaiters();
 
     const text = finalText ?? this.pendingText ?? this.state.currentText;
     const apiBase = resolveApiBase(this.creds.domain);
@@ -740,6 +777,7 @@ export class FeishuStreamingSession {
     this.closed = true;
     this.clearFlushTimer();
     await this.queue;
+    this.settleContentFlushWaiters();
 
     try {
       const response = await this.client.im.message.delete({
@@ -764,3 +802,4 @@ export class FeishuStreamingSession {
     return this.state !== null && !this.closed;
   }
 }
+/* oxlint-disable max-lines -- TODO: split alongside the other grandfathered feishu files. */

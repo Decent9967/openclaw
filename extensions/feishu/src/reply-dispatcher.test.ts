@@ -14,6 +14,7 @@ type StreamingSessionStub = {
   credentials: unknown;
   start: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
+  updateConfirmed: ReturnType<typeof vi.fn>;
   closeWithResult: Mock<FeishuStreamingSession["closeWithResult"]>;
   discard: Mock<FeishuStreamingSession["discard"]>;
   isActive: ReturnType<typeof vi.fn>;
@@ -139,6 +140,10 @@ vi.mock("./streaming-card.js", () => {
         this.active = true;
       });
       update = vi.fn(async () => {});
+      updateConfirmed = vi.fn(async (text: string): Promise<boolean> => {
+        await this.update(text);
+        return true;
+      });
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
         return {
@@ -4664,6 +4669,78 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       await vi.waitFor(() => {
         const latest = String(session.update.mock.calls.at(-1)?.[0]);
         expect(latest).toContain("资料齐了");
+      });
+    });
+
+    it("does not cache a publication the transport rejected and retries the identical draft", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.updateConfirmed).toHaveBeenCalled());
+
+      session.updateConfirmed.mockResolvedValueOnce(false);
+      const acknowledged = await result.replyOptions.onToolStart?.({
+        name: "web_search",
+        phase: "start",
+        args: { query: "openclaw" },
+      });
+      expect(acknowledged).toBe(false);
+      const rejectedText = session.updateConfirmed.mock.calls.at(-1)?.[0];
+
+      // The rejected publication must stay unacknowledged, so the identical
+      // event republishes the same draft instead of being deduped away.
+      const retried = await result.replyOptions.onToolStart?.({
+        name: "web_search",
+        phase: "start",
+        args: { query: "openclaw" },
+      });
+      expect(retried).toBe(true);
+      expect(session.updateConfirmed.mock.calls.at(-1)?.[0]).toBe(rejectedText);
+    });
+
+    it("drops silent NO_REPLY preambles instead of rendering a commentary line", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.updateConfirmed).toHaveBeenCalled());
+
+      const handled = await result.replyOptions.onItemEvent?.({
+        kind: "preamble",
+        itemId: "item-silent",
+        phase: "update",
+        progressText: "NO_REPLY",
+      });
+      expect(handled).toBe(false);
+      for (const call of session.updateConfirmed.mock.calls) {
+        expect(String(call?.[0])).not.toContain("NO_REPLY");
+      }
+    });
+
+    it("retracts a commentary line when its preamble item updates empty", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+
+      await result.replyOptions.onItemEvent?.({
+        kind: "preamble",
+        itemId: "item-retract",
+        phase: "update",
+        progressText: "temporary narration",
+      });
+      await vi.waitFor(() => {
+        expect(String(session.update.mock.calls.at(-1)?.[0])).toContain("temporary narration");
+      });
+
+      await result.replyOptions.onItemEvent?.({
+        kind: "preamble",
+        itemId: "item-retract",
+        phase: "update",
+        progressText: "",
+      });
+      await vi.waitFor(() => {
+        const latest = String(session.update.mock.calls.at(-1)?.[0]);
+        expect(latest).not.toContain("temporary narration");
+        expect(latest).toContain("🛠️ Bash");
       });
     });
 

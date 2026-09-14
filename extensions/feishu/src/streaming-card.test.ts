@@ -716,6 +716,119 @@ describe("FeishuStreamingSession", () => {
     ]);
   });
 
+  it("resolves updateConfirmed false after a rejected write and keeps the text retryable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_500);
+    const updateBodies: string[] = [];
+    const deps = createMemoryFetch((url, body) => {
+      if (url.pathname.includes("/auth/")) {
+        return jsonResponse({
+          code: 0,
+          msg: "ok",
+          tenant_access_token: "token",
+          expire: 7200,
+        });
+      }
+      if (url.pathname.includes("/elements/content/content")) {
+        updateBodies.push(body);
+        return jsonResponse(
+          updateBodies.length === 1
+            ? { code: 19_001, msg: "sequence rejected" }
+            : { code: 0, msg: "ok" },
+        );
+      }
+      return jsonResponse({ code: 0, msg: "ok" });
+    });
+    const session = new FeishuStreamingSession(
+      {} as never,
+      { appId: "app_confirmed_reject", appSecret: "secret" },
+      vi.fn(),
+      deps,
+    );
+    setStreamingSessionInternals(session, {
+      state: {
+        cardId: "card_confirmed_reject",
+        messageId: "om_confirmed_reject",
+        sequence: 1,
+        currentText: "seed",
+        sentText: "seed",
+        hasNote: false,
+      },
+      lastUpdateTime: 1_500,
+    });
+
+    // Outside the throttle window so the write is attempted at once.
+    vi.setSystemTime(2_000);
+    const rejected = session.updateConfirmed("draft A");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(rejected).resolves.toBe(false);
+    expect(updateBodies).toHaveLength(1);
+
+    // The caller-driven retry of the identical text is what proves the
+    // rejection was not cached as rendered.
+    const retry = session.updateConfirmed("draft A");
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(retry).resolves.toBe(true);
+    expect(updateBodies.map((body) => JSON.parse(body).content)).toEqual(["draft A", "draft A"]);
+  });
+
+  it("resolves updateConfirmed true once the throttled flush lands", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const updateBodies: string[] = [];
+    const deps = mockFetches(updateBodies);
+    const session = new FeishuStreamingSession(
+      {} as never,
+      { appId: "app_confirmed_throttle", appSecret: "secret" },
+      undefined,
+      deps,
+    );
+    setStreamingSessionInternals(session, {
+      state: {
+        cardId: "card_confirmed_throttle",
+        messageId: "om_confirmed_throttle",
+        sequence: 1,
+        currentText: "seed",
+        sentText: "seed",
+        hasNote: false,
+      },
+      lastUpdateTime: 1_000,
+    });
+
+    const confirmed = session.updateConfirmed("throttled draft");
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(confirmed).resolves.toBe(true);
+    expect(updateBodies.map((body) => JSON.parse(body).content)).toEqual(["throttled draft"]);
+  });
+
+  it("resolves a pending confirmed update as unacknowledged after close", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const updateBodies: string[] = [];
+    const deps = mockFetches(updateBodies);
+    const session = new FeishuStreamingSession(
+      {} as never,
+      { appId: "app_confirmed_close", appSecret: "secret" },
+      undefined,
+      deps,
+    );
+    setStreamingSessionInternals(session, {
+      state: {
+        cardId: "card_confirmed_close",
+        messageId: "om_confirmed_close",
+        sequence: 1,
+        currentText: "seed",
+        sentText: "seed",
+        hasNote: false,
+      },
+      lastUpdateTime: 1_000,
+    });
+
+    const confirmed = session.updateConfirmed("never lands");
+    await session.closeWithResult("final answer");
+    await expect(confirmed).resolves.toBe(false);
+  });
+
   it("pushes natural-boundary updates immediately inside the throttle window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000);

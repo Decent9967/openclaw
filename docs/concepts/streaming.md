@@ -208,7 +208,13 @@ bundled `extensions/feishu` channel) defaults to `partial` in direct chats.
 | Slack      | Yes           | Yes                                                                                                                                                | Yes     | Block Kit session card (default)     |
 | Mattermost | Yes           | Yes                                                                                                                                                | Yes     | Yes                                  |
 | MS Teams   | Yes           | Yes                                                                                                                                                | Yes     | native progress stream               |
-| Feishu     | Yes           | Yes (card edits; unavailable for replies that must carry outbound bot mentions, for `renderMode: "raw"`, and while modifying hooks are registered) | Yes     | progress draft on the streaming card |
+| Feishu     | Yes           | Yes — card edits carrying the rolling progress draft and narration commentary lines (unavailable for replies that must carry outbound bot mentions, for `renderMode: "raw"`, and while modifying hooks are registered) | No      | No                                   |
+
+The Feishu schema accepts only `off` and `partial` for `streaming.mode`; its
+progress rendering is the card-edit draft under `partial`, not the `progress`
+mode. Block-text delivery is configured separately through
+`channels.feishu.streaming.block.enabled` and is unaffected by the missing
+`block` mode value.
 
 Block streaming resolves per channel: an explicit
 `channels.<channel>.streaming.block.enabled` always wins; when it is unset, a
