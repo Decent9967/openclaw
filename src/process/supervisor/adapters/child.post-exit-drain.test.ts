@@ -1,0 +1,148 @@
+// Post-exit drain settlement for detached grandchildren (#147304): the run
+// settles once output goes idle after the root exits, and the settlement
+// leaves the streams open for delayed writers. Split from child.test.ts to
+// keep both files under the max-lines lint budget.
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createStubChild } from "./child.test-support.js";
+
+const { spawnWithFallbackMock } = vi.hoisted(() => ({
+  spawnWithFallbackMock: vi.fn(),
+}));
+
+vi.mock("../../spawn-utils.js", () => ({
+  spawnWithFallback: spawnWithFallbackMock,
+}));
+
+let createChildAdapter: typeof import("./child.js").createChildAdapter;
+
+describe("post-exit drain settlement for detached grandchildren", () => {
+  const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const setPlatform = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, "platform", { configurable: true, value: platform });
+  };
+  afterEach(() => {
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, "platform", originalPlatformDescriptor);
+    }
+  });
+
+  // Self-contained initialization: this suite must pass even when only these
+  // tests are run (e.g. `vitest run -t "post-exit drain"`), without relying on
+  // the sibling suite's beforeEach. (#147304 review follow-up)
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ createChildAdapter } = await import("./child.js"));
+    spawnWithFallbackMock.mockClear();
+  });
+
+  it("caps the drain when detached grandchildren hold stdio after the root exits", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    const wait = adapter.wait();
+    void wait.then(settled);
+
+    // Root exits while a detached grandchild keeps stdout open (no end/close).
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled();
+
+    // The bounded post-exit drain cap settles instead of waiting forever.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+
+  it("keeps draining while output continues after the root exits", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+    // Capture subscribers define an active drain: output activity is tracked
+    // through the capture path.
+    adapter.onStdout?.(() => {});
+    adapter.onStderr?.(() => {});
+
+    emitExit(0);
+    // While a detached descendant is still producing output, the drain cap
+    // must reschedule instead of destroying its pipe.
+    for (let i = 0; i < 3; i += 1) {
+      child.stdout?.push(`chunk ${i}\n`);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(settled).not.toHaveBeenCalled();
+    }
+
+    // Once output goes idle, the cap settles with the observed exit state.
+    (child.stdout as PassThrough).end();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+
+  it("delivers output that arrived before capture subscribers attached", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+
+    // Output arrives while no capture subscriber exists yet: paused-mode
+    // buffering must retain it until subscribers attach, not consume it.
+    child.stdout?.push(`early stdout\n`);
+    child.stderr?.push(`early stderr\n`);
+
+    const seen = { stdout: [] as string[], stderr: [] as string[] };
+    adapter.onStdout?.((text) => {
+      seen.stdout.push(text);
+    });
+    adapter.onStderr?.((text) => {
+      seen.stderr.push(text);
+    });
+    // Buffered pre-subscriber output flushes on the tick after capture starts.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.stdout.join("")).toContain("early stdout");
+    expect(seen.stderr.join("")).toContain("early stderr");
+
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(250);
+  });
+
+  it("keeps delivering output after the idle cap settles the run", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const seen: string[] = [];
+    adapter.onStdout?.((text) => {
+      seen.push(text);
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+
+    // A delayed writer keeps streaming after settlement: the idle cap must
+    // not destroy its output or the pipe it writes to.
+    child.stdout?.push(`after settle\n`);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.join("")).toContain("after settle");
+    expect(child.stdout?.destroyed).toBe(false);
+    expect(child.stderr?.destroyed).toBe(false);
+  });
+});
