@@ -13,6 +13,7 @@ import { assertSqliteIntegrityInWorker } from "../infra/sqlite-integrity-worker.
 import { assertSqliteIntegrity } from "../infra/sqlite-integrity.js";
 import {
   collectSqliteSchemaIssues,
+  createSqliteTableContractReader,
   type SqliteSchemaIssue,
 } from "../infra/sqlite-schema-contract.js";
 import { readSqliteWriterAppVersion as readWriterAppVersion } from "../infra/sqlite-schema-header.js";
@@ -215,16 +216,20 @@ function inspectCurrentStateStartupSchema(
       `OpenClaw state database ${databasePath} metadata schema version ${typeof metadata?.schema_version === "number" ? metadata.schema_version : "invalid"} does not match ${foundVersion}.`,
     );
   }
+  // Both policies inspect the same private or immutable snapshot; later opens read fresh facts.
+  const readTable = createSqliteTableContractReader(database);
   const issues = deduplicateSchemaIssues([
     ...collectSqliteSchemaIssues(
       database,
       OPENCLAW_STATE_SCHEMA_SQL,
       OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
+      readTable,
     ),
     ...collectSqliteSchemaIssues(
       database,
       getOpenClawStateRuntimeSchema({ includeVersionLazyAdditiveTables: false }),
       STATE_PERSISTENT_SCHEMA_COMPATIBILITY,
+      readTable,
     ),
   ]);
   return {
@@ -586,9 +591,8 @@ export async function preflightOpenClawDatabaseSchemas(options: {
         writerAppVersion = header.writerAppVersion;
         agentSchemaMeta = header.agentSchemaMeta;
       } else {
-        // Shape and ownership share one child read; startup readiness retains its snapshot.
+        // Ownership, integrity, and shape share one fresh child read transaction.
         if (
-          !options.requireStartupMigrationReadiness &&
           !hasStateDatabaseSourceExclusion(realAgentPath) &&
           !prepareStateDatabaseCanonicalMutation(realAgentPath)
         ) {
@@ -599,6 +603,7 @@ export async function preflightOpenClawDatabaseSchemas(options: {
               supportedVersion: supportedVersions.agent,
               inspectOwnership,
               verifyCurrentSchemaShape: options.verifyCurrentSchemaShape,
+              requireStartupMigrationReadiness: options.requireStartupMigrationReadiness,
             },
             options.signal,
           );
@@ -608,7 +613,7 @@ export async function preflightOpenClawDatabaseSchemas(options: {
           writerAppVersion = schemaInspection.writerAppVersion;
           agentSchemaMeta = schemaInspection.agentSchemaMeta;
         } else {
-          // Full readiness retains its private snapshot; diagnostics need only bounded metadata.
+          // Recovery and excluded sources retain the existing private snapshot owner.
           agentSnapshot = await prepareSqliteReadOnlyLocation(realAgentPath, {
             signal: options.signal,
           });
@@ -641,6 +646,9 @@ export async function preflightOpenClawDatabaseSchemas(options: {
           foundVersion: agentVersion,
           supportedVersion: supportedVersions.agent,
         });
+      }
+      if (schemaInspection?.failure) {
+        throw schemaInspection.failure;
       }
       if (schemaInspection?.reason) {
         throw new Error(schemaInspection.reason);

@@ -1,3 +1,7 @@
+import {
+  readSessionMessageIdentity,
+  reduceSessionProjection,
+} from "@openclaw/gateway-client/browser";
 import type { SessionsCatalogContinueResult } from "../../../../packages/gateway-protocol/src/index.js";
 import {
   COMMAND_PALETTE_TARGET_EVENT,
@@ -45,7 +49,11 @@ import { isTranscriptScrollKey } from "./chat-scroll-input.ts";
 import type { ChatState } from "./chat-state-contract.ts";
 import { resolveChatAgentId } from "./chat-state-route.ts";
 import { persistChatComposerState } from "./composer-persistence.ts";
-import { publishChatSessionProjectionMessages } from "./history-merge.ts";
+import {
+  getChatSessionProjection,
+  publishChatSessionProjectionMessages,
+  retireChatSubmissionDisplay,
+} from "./history-merge.ts";
 import {
   captureChatSessionScrollPosition,
   saveChatSessionScrollPosition,
@@ -355,6 +363,40 @@ export abstract class ChatPaneHistory extends ChatPaneReplyNavigation {
         const nextPagination = resolveChatHistoryPagination(result);
         const exhausted = !nextPagination.hasMore || nextPagination.nextOffset <= requestedOffset;
         const messages = Array.isArray(result.messages) ? result.messages : [];
+        const projection = getChatSessionProjection(state);
+        const pendingUsers = projection.entries.filter(
+          (entry) => entry.pending && entry.identity?.role === "user" && entry.pendingRunId,
+        );
+        if (pendingUsers.length) {
+          const canonicalUsers = messages.filter((message) => {
+            const identity = readSessionMessageIdentity(message);
+            return (
+              identity?.role === "user" &&
+              !identity.isImported &&
+              (identity.id !== null || identity.sequence !== null)
+            );
+          });
+          // Use canonical adoption without reseeding the existing tail's live
+          // provenance or changing the raw order of older-page projections.
+          const adopted = reduceSessionProjection(projection, {
+            type: "snapshotLoaded",
+            messages: canonicalUsers,
+            scope: projection.scope,
+          });
+          const remaining = new Set(
+            adopted.entries.filter((entry) => entry.pending).map((entry) => entry.pendingRunId),
+          );
+          retireChatSubmissionDisplay(
+            state,
+            new Set(
+              pendingUsers.flatMap((entry) =>
+                entry.pendingRunId && !remaining.has(entry.pendingRunId)
+                  ? [entry.pendingRunId]
+                  : [],
+              ),
+            ),
+          );
+        }
         const nextMessages = this.prependUniqueNativeMessages(messages, state.chatMessages);
         const grew = nextMessages.length > state.chatMessages.length;
         publishChatSessionProjectionMessages(state, nextMessages);

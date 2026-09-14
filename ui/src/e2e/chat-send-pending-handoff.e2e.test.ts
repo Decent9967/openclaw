@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 import { expect, it } from "vitest";
 import { installMockGateway, type MockGatewayControls } from "../test-helpers/control-ui-e2e.ts";
+import { waitForChatScrollIdle } from "./chat-flow.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({
@@ -221,6 +222,167 @@ function isHealthyImageFrame(frame: FrameSample): boolean {
 }
 
 suite.define(() => {
+  it("does not recreate a consumed prompt outside the visible history page after reconnect", async () => {
+    const proofDir = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim()
+      ? suite.artifactDir
+      : undefined;
+    await suite.withPage(
+      { locale: "en-US", serviceWorkers: "block", viewport: { height: 900, width: 1280 } },
+      async ({ page: currentPage }) => {
+        const captureProof = async (filename: string) => {
+          if (proofDir) {
+            await currentPage.screenshot({ path: path.join(proofDir, filename) });
+          }
+        };
+        const sessionId = "consumed-prompt-session";
+        const prompt = "land PR";
+        const finalText = "Landed the PR. All focused checks passed.";
+        const executionRunId = "recovered-execution";
+        const gateway = await installMockGateway(currentPage, {
+          agentModel: "openai/gpt-5.5",
+          historyMessages: BASE_HISTORY,
+          sessions: [{ key: "main", sessionId, label: "Synthetic PR landing" }],
+        });
+        const { runId } = await openChatAndSubmitProbe(currentPage, gateway, {
+          deferSend: true,
+          probeText: prompt,
+        });
+        await stopFrameSampler(currentPage);
+        await gateway.setOnline(false);
+        await currentPage
+          .locator('.chat-send-status[data-send-state="waiting-reconnect"]')
+          .getByText("Waiting for reconnect", { exact: true })
+          .waitFor();
+
+        const timestamp = Date.now() - 60_000;
+        const userEcho = {
+          role: "user",
+          content: [{ type: "text", text: prompt }],
+          timestamp,
+          __openclaw: {
+            id: USER_ECHO_ENTRY_ID,
+            idempotencyKey: `${runId}:user`,
+            runId: executionRunId,
+            seq: 489,
+          },
+        };
+        const checks = Array.from({ length: 57 }, (_, index) => {
+          const seq = 490 + index * 2;
+          const toolCallId = `synthetic-check-${index}`;
+          return [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: toolCallId,
+                  name: "exec",
+                  arguments: { command: "pnpm check" },
+                },
+              ],
+              timestamp: timestamp + seq,
+              __openclaw: { id: `entry-${seq}`, seq, runId: executionRunId },
+            },
+            {
+              role: "toolResult",
+              toolCallId,
+              toolName: "exec",
+              content: [{ type: "text", text: "Focused check passed." }],
+              timestamp: timestamp + seq + 1,
+              __openclaw: { id: `entry-${seq + 1}`, seq: seq + 1, runId: executionRunId },
+            },
+          ];
+        }).flat();
+        const finalMessage = {
+          role: "assistant",
+          content: [{ type: "text", text: finalText }],
+          timestamp: timestamp + 605,
+          __openclaw: { id: "consumed-prompt-final", seq: 605, runId: executionRunId },
+        };
+        const history = [...BASE_HISTORY, userEcho, ...checks, finalMessage];
+        const recent = history.slice(-80);
+        const older = history.slice(0, -80);
+        const sessionInfo = {
+          key: "main",
+          sessionId,
+          status: "done",
+          activeRunIds: [],
+          hasActiveRun: false,
+          lastRunId: executionRunId,
+        };
+        const response = {
+          sessionId,
+          sessionInfo,
+          thinkingLevel: null,
+          totalMessages: 605,
+        };
+        const latestPage = { ...response, messages: recent, hasMore: true, nextOffset: 80 };
+        await gateway.setMethodResponse("chat.startup", latestPage);
+        await gateway.setMethodResponse("chat.history", {
+          cases: [
+            {
+              match: { inputRunIds: [runId], limit: 1000 },
+              response: {
+                ...response,
+                messages: history,
+                hasMore: false,
+                inputReceipts: [
+                  { runId, state: "consumed", consumedByEventId: USER_ECHO_ENTRY_ID },
+                ],
+              },
+            },
+            { match: { offset: 80 }, response: { ...response, messages: older, hasMore: false } },
+            { match: {}, response: latestPage },
+          ],
+        });
+        // Collapsed tool turns fit the viewport, so the UI can request older
+        // history immediately. Hold that response until after receipt recovery.
+        await gateway.deferNext("chat.history", { offset: 80 });
+        await gateway.setOnline(true);
+        await gateway.waitForRequest("chat.history", {
+          match: { inputRunIds: [runId], limit: 1000 },
+        });
+        await currentPage.getByText(finalText, { exact: true }).waitFor();
+        await expect.poll(() => currentPage.locator(".chat-send-status").count()).toBe(0);
+        await gateway.emitGatewayEvent("session.message", {
+          sessionKey: "main",
+          sessionId,
+          clientRunId: executionRunId,
+          message: finalMessage,
+          messageId: "consumed-prompt-final",
+          messageSeq: 605,
+          activeRunIds: [],
+          hasActiveRun: false,
+          session: sessionInfo,
+        });
+        await waitForChatScrollIdle(currentPage);
+        // Retain the failed UI too: a phantom source appears below the completed
+        // answer even though its only durable copy belongs to an older page.
+        await captureProof("consumed-prompt-latest-page.png");
+        const userBubbles = currentPage.locator(".chat-bubble").getByText(prompt, { exact: true });
+        const latestPromptCount = await userBubbles.count();
+
+        await gateway.waitForRequest("chat.history", { match: { offset: 80 } });
+        await gateway.resolveDeferred("chat.history");
+        await waitForChatScrollIdle(currentPage);
+        const thread = currentPage.locator(".chat-pane-cache__pane--active .chat-thread");
+        await thread.hover();
+        await currentPage.mouse.wheel(0, -1_000_000);
+        await gateway.waitForRequest("chat.history", { match: { offset: 80 } });
+        await currentPage.locator(`.chat-bubble[data-entry-id="${USER_ECHO_ENTRY_ID}"]`).waitFor();
+        await waitForChatScrollIdle(currentPage);
+        await captureProof("consumed-prompt-loaded-history.png");
+        expect(latestPromptCount).toBe(0);
+        expect(await userBubbles.count()).toBe(1);
+        expect(await currentPage.locator(".chat-send-status").count()).toBe(0);
+        expect(await currentPage.getByRole("button", { name: "Stop", exact: true }).count()).toBe(
+          0,
+        );
+        expect(await gateway.getRequests("chat.send")).toHaveLength(1);
+      },
+    );
+  });
+
   it("does not replay a retired user bubble after a later history page omits it", async () => {
     const proofDir = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim()
       ? suite.artifactDir

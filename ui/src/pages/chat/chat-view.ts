@@ -1,5 +1,4 @@
 import { html, nothing, type TemplateResult } from "lit";
-import { ref } from "lit/directives/ref.js";
 import { styleMap } from "lit/directives/style-map.js";
 import type {
   SessionPlacementDiskSpace,
@@ -33,6 +32,7 @@ import {
   renderChatTopbarNotices,
 } from "./chat-view-notices.ts";
 import { createChatAttachmentDropHandlers } from "./components/chat-attachments.ts";
+import { getChatComposerState } from "./components/chat-composer-state.ts";
 import type { ChatComposerProps } from "./components/chat-composer-types.ts";
 import { isChatRunWorking, renderChatComposer } from "./components/chat-composer.ts";
 import { isImageLightboxEvent, openInlineChatImage } from "./components/chat-image-lightbox.ts";
@@ -161,7 +161,6 @@ export function renderChat(props: ChatProps) {
     : props.queue;
   // Placement is visible work, but does not own an abortable model run yet.
   const runWorking = Boolean(placementStartup) || isChatRunWorking(props);
-  let chatSection: HTMLElement | null = null;
   const thread = renderPluginSurface(
     "transcript",
     {
@@ -209,8 +208,10 @@ export function renderChat(props: ChatProps) {
               }
             : undefined,
         onOpenSession: props.onSessionSelect,
+        // Portaled menus can outlive a render; resolve focus from the current session owner.
         onFocusComposer: () =>
-          chatSection
+          props.transcript.scrollElement
+            ?.closest(".card.chat")
             ?.querySelector<HTMLElement>(
               "openclaw-plugin-view[data-plugin-composer], .agent-chat__composer-combobox > textarea",
             )
@@ -314,9 +315,6 @@ export function renderChat(props: ChatProps) {
 
   return html`
     <section
-      ${ref((element) => {
-        chatSection = element instanceof HTMLElement ? element : null;
-      })}
       class="card chat"
       style=${styleMap(
         props.chatMessageMaxWidth
@@ -341,7 +339,14 @@ export function renderChat(props: ChatProps) {
         ) {
           return;
         }
-        if (event.key === "Escape" && props.replyTarget && !event.defaultPrevented) {
+        if (
+          event.key === "Escape" &&
+          props.replyTarget &&
+          !event.defaultPrevented &&
+          !event.isComposing &&
+          event.keyCode !== 229 &&
+          !getChatComposerState(props.paneId).composerComposing
+        ) {
           event.preventDefault();
           props.onClearReply?.();
           return;
