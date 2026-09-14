@@ -1642,7 +1642,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     });
   });
 
-  it("honors agents.defaults.blockStreamingDefault when the channel leaves blocks unset and no preview can render", () => {
+  it("delivers mid-turn blocks as independent messages from the agent default when no preview can render", async () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
       appId: "app_id",
@@ -1656,15 +1656,18 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       },
     });
 
-    const result = createFeishuReplyDispatcher({
+    const { options } = createDispatcherHarness({
       cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
-      agentId: "agent",
-      runtime: {} as never,
-      chatId: "oc_chat",
-      sendTarget: "oc_chat",
     });
 
-    expect(result.replyOptions).toHaveProperty("disableBlockStreaming", false);
+    await options.deliver({ text: "progress: three failures located" }, { kind: "block" });
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(0);
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expectMockArgFields(sendMessageFeishuMock, "block message params", {
+      text: "progress: three failures located",
+    });
   });
 
   it("keeps blocks off when the explicit preview mode wins over the agent default", () => {
