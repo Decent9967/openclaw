@@ -1156,4 +1156,32 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     emitExit(0);
     await vi.advanceTimersByTimeAsync(250);
   });
+
+  it("keeps delivering output after the idle cap settles the run", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const seen: string[] = [];
+    adapter.onStdout?.((text) => {
+      seen.push(text);
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+
+    // A delayed writer keeps streaming after settlement: the idle cap must
+    // not destroy its output or the pipe it writes to.
+    child.stdout?.push(`after settle\n`);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.join("")).toContain("after settle");
+    expect(child.stdout?.destroyed).toBe(false);
+    expect(child.stderr?.destroyed).toBe(false);
+  });
 });
