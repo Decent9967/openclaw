@@ -304,7 +304,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     previewAvailable: previewStreamingEnabled,
     blockStreamingDefault: cfg.agents?.defaults?.blockStreamingDefault,
   });
-  const coreBlockStreamingEnabled = blockStreamingEnabled === true;
+  const coreBlockStreamingEnabled = blockStreamingEnabled;
   const reasoningPreviewEnabled = previewStreamingEnabled && params.allowReasoningPreview === true;
 
   let streaming: FeishuStreamingSession | null = null;
