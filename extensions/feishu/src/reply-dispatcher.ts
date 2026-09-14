@@ -578,14 +578,16 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       if (streamingToClose?.isActive()) {
         // Append finalize keeps the rolling progress lines but drops the rotating
         // status label (it marks an in-flight turn, which has just ended) and
-        // places the retained lines above the answer behind a divider;
-        // overwrite drops them entirely, matching the other draft channels.
-        const retainedProgress = keepProgressAtFinal
-          ? stripFeishuProgressLabel(statusLine, progressDraftLabel)
-          : "";
+        // places the retained lines above the answer behind a separator.
+        // Progress only counts as delivered content alongside a committed
+        // answer: retaining it on an empty turn would make closeWithResult
+        // report visible content and suppress the no-visible-reply fallback.
+        // Overwrite drops the lines entirely, matching the other draft channels.
+        const retainedProgress =
+          keepProgressAtFinal && finalizedAnswerText
+            ? stripFeishuProgressLabel(statusLine, progressDraftLabel)
+            : "";
         statusLine = "";
-        // "· · ·" avoids colliding with Markdown dividers the answer itself may
-        // contain; the tool lines' 🧩 prefixes carry the visual distinction.
         const text = retainedProgress
           ? `${retainedProgress}\n\n· · ·\n\n${buildCombinedStreamText(finalizedReasoningText, finalizedAnswerText)}`
           : buildCombinedStreamText(finalizedReasoningText, finalizedAnswerText);
@@ -764,12 +766,22 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     mode: streamMode,
     active: previewStreamingEnabled,
     seed: `${account.accountId}:${sendTarget}`,
-    update: (draftText, options) => {
+    update: async (draftText, options) => {
       statusLine = draftText;
       progressDraftLabel = options.snapshot.label;
       startStreaming();
+      // Only acknowledge once CardKit creation actually settled: an
+      // acknowledged publication is cached as rendered, so reporting success
+      // while the start promise is pending would swallow identical retries
+      // after a failed startup (and its backoff window).
+      if (streamingStartPromise) {
+        await streamingStartPromise;
+      }
+      if (!streaming?.isActive()) {
+        return false;
+      }
       flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
-      return Boolean(streaming || streamingStartPromise);
+      return true;
     },
     deleteCurrent: async () => {
       statusLine = "";

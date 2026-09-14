@@ -4543,6 +4543,45 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       expect(closedWith.slice(0, answerAt)).toContain("· · ·");
     });
 
+    it("sends no-visible-reply fallback after an empty card close in append mode", async () => {
+      resolveFeishuAccountMock.mockReturnValue({
+        accountId: "main",
+        appId: "app_id",
+        appSecret: "app_secret",
+        domain: "feishu",
+        config: {
+          renderMode: "card",
+          streaming: { mode: "partial", finalize: "append" },
+        },
+      });
+      const runtime = createRuntimeLogger();
+      const { result, options } = createDispatcherHarness({ runtime });
+
+      await options.onReplyStart?.();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      await vi.waitFor(() => expect(streamingInstances).toHaveLength(1));
+      await options.onIdle?.();
+      await expect(result.ensureNoVisibleReplyFallback("zero-final-count")).resolves.toBe(true);
+
+      // Retained progress must not count as delivered content without an answer.
+      expect(requireStreamingInstance(0).closeWithResult).toHaveBeenCalledWith("", {
+        note: "Agent: agent",
+      });
+      expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not acknowledge draft publications while card startup is backed off", async () => {
+      const { result } = createDispatcherHarness();
+      streamingStartBackoffUntilByAccount.set("main", Date.now() + 60_000);
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      expect(streamingInstances).toHaveLength(0);
+
+      streamingStartBackoffUntilByAccount.delete("main");
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+    });
+
     it("starts the streaming card on the first tool event and rolls progress text", async () => {
       const { result } = createDispatcherHarness();
       await result.replyOptions.onToolStart?.({
