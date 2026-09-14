@@ -35,7 +35,7 @@ import {
   renderFeishuReplyPayload,
   withinCardTableLimit,
 } from "./presentation-card.js";
-import { buildFeishuCompactionProgressLine } from "./progress-draft.js";
+import { buildFeishuCompactionProgressLine, stripFeishuProgressLabel } from "./progress-draft.js";
 import {
   createFeishuPartialReplyDeliveryError,
   createFeishuReplyDeliveryResult,
@@ -283,6 +283,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const tableMode = core.channel.text.resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const renderMode = account.config?.renderMode ?? "auto";
   const streamMode = resolveChannelPreviewStreamMode(account.config, "partial");
+  const keepProgressAtFinal = account.config?.streaming?.finalize === "append";
   // Streaming cards cannot attach native mention recipients. Bot-authored ingress
   // therefore uses normal cards/posts so every emitted unit reaches the peer bot.
   const streamingEnabled =
@@ -312,6 +313,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   let lastPartial = "";
   let reasoningText = "";
   let statusLine = "";
+  let progressDraftLabel: string | undefined;
   let snapshotBaseText = "";
   let lastSnapshotTextLength = 0;
   // Partial previews are replaceable; only committed final text may precede an error notice.
@@ -574,8 +576,19 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       let result = noVisibleFeishuReplyDelivery;
       let finalizationError: unknown;
       if (streamingToClose?.isActive()) {
+        // Append finalize keeps the rolling progress lines but drops the rotating
+        // status label (it marks an in-flight turn, which has just ended) and
+        // places the retained lines above the answer behind a divider;
+        // overwrite drops them entirely, matching the other draft channels.
+        const retainedProgress = keepProgressAtFinal
+          ? stripFeishuProgressLabel(statusLine, progressDraftLabel)
+          : "";
         statusLine = "";
-        const text = buildCombinedStreamText(finalizedReasoningText, finalizedAnswerText);
+        // "· · ·" avoids colliding with Markdown dividers the answer itself may
+        // contain; the tool lines' 🧩 prefixes carry the visual distinction.
+        const text = retainedProgress
+          ? `${retainedProgress}\n\n· · ·\n\n${buildCombinedStreamText(finalizedReasoningText, finalizedAnswerText)}`
+          : buildCombinedStreamText(finalizedReasoningText, finalizedAnswerText);
         let closed;
         try {
           if (disposition === "discarded") {
@@ -751,8 +764,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     mode: streamMode,
     active: previewStreamingEnabled,
     seed: `${account.accountId}:${sendTarget}`,
-    update: (draftText) => {
+    update: (draftText, options) => {
       statusLine = draftText;
+      progressDraftLabel = options.snapshot.label;
       startStreaming();
       flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
       return Boolean(streaming || streamingStartPromise);
@@ -1330,9 +1344,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         visibleReplySent = false;
         replyOutcome = undefined;
       }
-      if (previewStreamingEnabled && renderMode === "card") {
-        startStreaming();
-      }
+      // The streaming card starts lazily on the first work event or streamed
+      // text, like the other draft channels; no eager placeholder card here.
       await Promise.resolve(typingCallbacks?.onReplyStart?.());
     },
     onIdle: () => queueIdleSideEffects(),
@@ -1676,6 +1689,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     replyOptions: {
       onModelSelected,
       disableBlockStreaming: !blockStreamingEnabled,
+      // The streaming card's progress draft owns tool-progress display while the
+      // preview is active; core only forwards quiet progress callbacks (onToolStart,
+      // onItemEvent, onPlanUpdate, onCommandOutput, compaction) to channels that
+      // declare ownership this way when tool summaries are hidden.
+      suppressDefaultToolProgressMessages: previewStreamingEnabled,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {

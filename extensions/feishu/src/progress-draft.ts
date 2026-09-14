@@ -23,3 +23,15 @@ export function buildFeishuCompactionProgressLine(
     prefix: false,
   };
 }
+
+/**
+ * Drops the rotating status label ("Working" and friends) from a composed
+ * draft when append finalize retains the progress lines: the label describes
+ * an in-flight turn and reads wrong once the final answer has landed.
+ */
+export function stripFeishuProgressLabel(draftText: string, label?: string): string {
+  if (!label || !draftText.startsWith(label)) {
+    return draftText;
+  }
+  return draftText.slice(label.length).replace(/^\n+/, "");
+}

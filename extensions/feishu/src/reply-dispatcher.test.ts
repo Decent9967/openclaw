@@ -4235,6 +4235,10 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     const { result, options } = createDispatcherHarness({ runtime });
 
     await options.onReplyStart?.();
+    // Lazy drafts: a work event starts the card; the default overwrite finalize
+    // still closes it with no content when no answer text ever arrives.
+    await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+    await vi.waitFor(() => expect(streamingInstances).toHaveLength(1));
     await options.onIdle?.();
     await expect(result.ensureNoVisibleReplyFallback("zero-final-count")).resolves.toBe(true);
 
@@ -4503,6 +4507,42 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
   });
 
   describe("progress draft compositor", () => {
+    it("does not create a placeholder card on reply start (lazy draft)", async () => {
+      resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial", "feishu"));
+      const { result, options } = createDispatcherHarness();
+      await options.onReplyStart?.();
+      expect(streamingInstances).toHaveLength(0);
+
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      expect(streamingInstances).toHaveLength(1);
+    });
+
+    it("keeps rolling progress lines above the final answer behind a divider with streaming.finalize append", async () => {
+      resolveFeishuAccountMock.mockReturnValue({
+        accountId: "main",
+        appId: "app_id",
+        appSecret: "app_secret",
+        domain: "feishu",
+        config: {
+          renderMode: "card",
+          streaming: { mode: "partial", finalize: "append" },
+        },
+      });
+      const { result, options } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "web_search", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+
+      const delivery = await options.deliver({ text: "Final answer" }, { kind: "final" });
+      await options.onIdle?.();
+      await delivery?.finalization;
+      const closedWith = String(session.closeWithResult.mock.calls[0]?.[0]);
+      expect(closedWith).toContain("Final answer");
+      const answerAt = closedWith.indexOf("Final answer");
+      expect(answerAt).toBeGreaterThan(0);
+      expect(closedWith.slice(0, answerAt)).toContain("· · ·");
+    });
+
     it("starts the streaming card on the first tool event and rolls progress text", async () => {
       const { result } = createDispatcherHarness();
       await result.replyOptions.onToolStart?.({
