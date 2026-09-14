@@ -1055,7 +1055,6 @@ describe("createChildAdapter", () => {
   });
 });
 
-
 describe("post-exit drain settlement for detached grandchildren", () => {
   const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
   const setPlatform = (platform: NodeJS.Platform) => {
@@ -1113,13 +1112,13 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     // While a detached descendant is still producing output, the drain cap
     // must reschedule instead of destroying its pipe.
     for (let i = 0; i < 3; i += 1) {
-      child.stdout?.write(`chunk ${i}\n`);
+      child.stdout?.emit("data", `chunk ${i}\n`);
       await vi.advanceTimersByTimeAsync(200);
       expect(settled).not.toHaveBeenCalled();
     }
 
     // Once output goes idle, the cap settles with the observed exit state.
-    child.stdout?.end();
+    (child.stdout as PassThrough).end();
     await vi.advanceTimersByTimeAsync(250);
     expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
   });
