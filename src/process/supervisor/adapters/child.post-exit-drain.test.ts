@@ -16,6 +16,8 @@ vi.mock("../../spawn-utils.js", () => ({
 
 let createChildAdapter: typeof import("./child.js").createChildAdapter;
 
+const FORCE_KILL_WAIT_FALLBACK_MS = 4000;
+
 describe("post-exit drain settlement for detached grandchildren", () => {
   const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
   const setPlatform = (platform: NodeJS.Platform) => {
@@ -56,6 +58,52 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     // The bounded post-exit drain cap settles instead of waiting forever.
     await vi.advanceTimersByTimeAsync(250);
     expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+
+  it("keeps the idle cap from settling once a termination was requested", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+
+    // A cancellation reaches the adapter before the root exits; the detached
+    // grandchild still holds stdout. The supervisor's escalation owns cleanup,
+    // so the idle cap must not settle it early.
+    adapter.kill("SIGTERM");
+    emitExit(null, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(settled).not.toHaveBeenCalled();
+
+    // The supervisor escalates to a hard kill; that path arms its own
+    // fallback and settles the wait on its schedule, not the idle cap's.
+    adapter.kill("SIGKILL");
+    await vi.advanceTimersByTimeAsync(FORCE_KILL_WAIT_FALLBACK_MS);
+    expect(settled).toHaveBeenCalled();
+  });
+
+  it("disarms an already-armed idle cap when a termination arrives", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+
+    // The root exits first and the cap arms; the cancellation arrives inside
+    // the idle window and must disarm it.
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    adapter.kill("SIGTERM");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(settled).not.toHaveBeenCalled();
   });
 
   it("keeps draining while output continues after the root exits", async () => {

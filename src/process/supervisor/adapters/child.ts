@@ -295,6 +295,10 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
   let forcedWindowsCloseTimer: NodeJS.Timeout | null = null;
   let postExitCloseSettlementTimer: NodeJS.Timeout | null = null;
   let hardKillRequested = false;
+  // Any requested termination (soft or hard) transfers cleanup ownership to
+  // the supervisor's escalation flow; the normal-exit idle cap must not
+  // settle cleanup out from under it (#147335 review).
+  let terminationRequested = false;
   let windowsTreeKillCompleted = false;
   let childExitState: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   let childCloseState: { code: number | null; signal: NodeJS.Signals | null } | null = null;
@@ -402,6 +406,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     if (
       process.platform === "win32" ||
       postExitCloseSettlementTimer ||
+      terminationRequested ||
       childExitState == null ||
       workerIpcDisconnected ||
       (stdoutDrained && stderrDrained)
@@ -534,6 +539,10 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     if (processClosed) {
       return;
     }
+    // A termination request owns cleanup from here on: disarm the normal-exit
+    // idle cap so it cannot resolve cleanup while the supervisor escalates.
+    terminationRequested = true;
+    clearPostExitCloseSettlement();
     const pid = child.pid ?? undefined;
     if (signal === undefined || signal === "SIGKILL") {
       hardKillRequested = true;
