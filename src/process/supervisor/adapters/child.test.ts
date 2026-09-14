@@ -1107,12 +1107,16 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     });
     const settled = vi.fn();
     void adapter.wait().then(settled);
+    // Capture subscribers define an active drain: output activity is tracked
+    // through the capture path.
+    adapter.onStdout?.(() => {});
+    adapter.onStderr?.(() => {});
 
     emitExit(0);
     // While a detached descendant is still producing output, the drain cap
     // must reschedule instead of destroying its pipe.
     for (let i = 0; i < 3; i += 1) {
-      child.stdout?.emit("data", `chunk ${i}\n`);
+      child.stdout?.push(`chunk ${i}\n`);
       await vi.advanceTimersByTimeAsync(200);
       expect(settled).not.toHaveBeenCalled();
     }
@@ -1121,5 +1125,35 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     (child.stdout as PassThrough).end();
     await vi.advanceTimersByTimeAsync(250);
     expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+
+  it("delivers output that arrived before capture subscribers attached", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+
+    // Output arrives while no capture subscriber exists yet: paused-mode
+    // buffering must retain it until subscribers attach, not consume it.
+    child.stdout?.push(`early stdout\n`);
+    child.stderr?.push(`early stderr\n`);
+
+    const seen = { stdout: [] as string[], stderr: [] as string[] };
+    adapter.onStdout?.((text) => {
+      seen.stdout.push(text);
+    });
+    adapter.onStderr?.((text) => {
+      seen.stderr.push(text);
+    });
+    // Buffered pre-subscriber output flushes on the tick after capture starts.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.stdout.join("")).toContain("early stdout");
+    expect(seen.stderr.join("")).toContain("early stderr");
+
+    emitExit(0);
+    await vi.advanceTimersByTimeAsync(250);
   });
 });

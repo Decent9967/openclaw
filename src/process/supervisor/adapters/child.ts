@@ -236,14 +236,6 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
   child.stdout.on("error", (error) => events.emitError(error, "stdout"));
   child.stderr.on("error", (error) => events.emitError(error, "stderr"));
   child.stdin?.on("error", (error) => events.emitError(error, "stdin"));
-  // Track output activity so the post-exit drain cap only fires once the
-  // streams have gone idle (active producers keep their pipes). (#147304)
-  child.stdout?.on("data", () => {
-    lastOutputAtMs = Date.now();
-  });
-  child.stderr?.on("data", () => {
-    lastOutputAtMs = Date.now();
-  });
   const childStdin = spawned.child.stdin;
   const stdin = createManagedChildStdin(childStdin);
   const outputUnsubscribers: Array<() => void> = [];
@@ -254,12 +246,42 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
       ),
     );
   }
+  // Output activity is tracked through the capture path only: pre-subscriber
+  // arrivals stay buffered in the paused stream until a subscriber attaches,
+  // so nothing is consumed or lost before capture begins (#147304).
+  const trackOutputActivity = () => {
+    lastOutputAtMs = Date.now();
+  };
   const onStdout: ChildAdapter["onStdout"] = (listener, onRaw) => {
-    outputUnsubscribers.push(onDecodedOutput(child.stdout, listener, onRaw));
+    outputUnsubscribers.push(
+      onDecodedOutput(
+        child.stdout,
+        (text) => {
+          trackOutputActivity();
+          listener(text);
+        },
+        (chunk) => {
+          trackOutputActivity();
+          onRaw?.(chunk);
+        },
+      ),
+    );
   };
 
   const onStderr: ChildAdapter["onStderr"] = (listener, onRaw) => {
-    outputUnsubscribers.push(onDecodedOutput(child.stderr, listener, onRaw));
+    outputUnsubscribers.push(
+      onDecodedOutput(
+        child.stderr,
+        (text) => {
+          trackOutputActivity();
+          listener(text);
+        },
+        (chunk) => {
+          trackOutputActivity();
+          onRaw?.(chunk);
+        },
+      ),
+    );
   };
 
   const completion = createDeferredCore<{ code: number | null; signal: NodeJS.Signals | null }>();
