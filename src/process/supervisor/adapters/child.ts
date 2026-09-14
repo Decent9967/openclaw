@@ -236,6 +236,14 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
   child.stdout.on("error", (error) => events.emitError(error, "stdout"));
   child.stderr.on("error", (error) => events.emitError(error, "stderr"));
   child.stdin?.on("error", (error) => events.emitError(error, "stdin"));
+  // Track output activity so the post-exit drain cap only fires once the
+  // streams have gone idle (active producers keep their pipes). (#147304)
+  child.stdout?.on("data", () => {
+    lastOutputAtMs = Date.now();
+  });
+  child.stderr?.on("data", () => {
+    lastOutputAtMs = Date.now();
+  });
   const childStdin = spawned.child.stdin;
   const stdin = createManagedChildStdin(childStdin);
   const outputUnsubscribers: Array<() => void> = [];
@@ -270,6 +278,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
   let childCloseState: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   let stdoutDrained = child.stdout == null;
   let stderrDrained = child.stderr == null;
+  let lastOutputAtMs = Date.now();
   let workerIpcDisconnected = false;
   let openWorkerStdio = 0;
 
@@ -377,16 +386,21 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
     ) {
       return;
     }
+    const exitState = childExitState;
     // A detached grandchild can inherit the child's stdio handles and hold
     // them open long after the root command exits (e.g. `nohup sleep 600 |
     // cat &`). The run's outcome is already determined by the root's exit;
-    // cap the drain window so the session settles instead of waiting on a
+    // cap the drain window once output goes idle instead of waiting on a
     // pipe we do not own. (#147304)
     postExitCloseSettlementTimer = setTimeout(() => {
       postExitCloseSettlementTimer = null;
+      if (Date.now() - lastOutputAtMs < POST_EXIT_CLOSE_SETTLE_MS) {
+        schedulePostExitCloseSettlement();
+        return;
+      }
       child.stdout?.destroy();
       child.stderr?.destroy();
-      settleObservedClose(resolveObservedExitState(childExitState));
+      settleObservedClose(resolveObservedExitState(exitState));
     }, POST_EXIT_CLOSE_SETTLE_MS);
     postExitCloseSettlementTimer.unref?.();
   };

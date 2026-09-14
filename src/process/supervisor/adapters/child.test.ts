@@ -1067,6 +1067,15 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     }
   });
 
+  // Self-contained initialization: this suite must pass even when only these
+  // tests are run (e.g. `vitest run -t "post-exit drain"`), without relying on
+  // the sibling suite's beforeEach. (#147304 review follow-up)
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ createChildAdapter } = await import("./child.js"));
+    spawnWithFallbackMock.mockClear();
+  });
+
   it("caps the drain when detached grandchildren hold stdio after the root exits", async () => {
     vi.useFakeTimers();
     setPlatform("linux");
@@ -1085,6 +1094,32 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     expect(settled).not.toHaveBeenCalled();
 
     // The bounded post-exit drain cap settles instead of waiting forever.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
+  });
+
+  it("keeps draining while output continues after the root exits", async () => {
+    vi.useFakeTimers();
+    setPlatform("linux");
+    const { child, emitExit } = createStubChild();
+    spawnWithFallbackMock.mockResolvedValue({ child, usedFallback: false });
+    const adapter = await createChildAdapter({
+      argv: ["bash", "-c", "nohup sleep 600 | cat &"],
+    });
+    const settled = vi.fn();
+    void adapter.wait().then(settled);
+
+    emitExit(0);
+    // While a detached descendant is still producing output, the drain cap
+    // must reschedule instead of destroying its pipe.
+    for (let i = 0; i < 3; i += 1) {
+      child.stdout?.write(`chunk ${i}\n`);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(settled).not.toHaveBeenCalled();
+    }
+
+    // Once output goes idle, the cap settles with the observed exit state.
+    child.stdout?.end();
     await vi.advanceTimersByTimeAsync(250);
     expect(settled).toHaveBeenCalledWith({ code: 0, signal: null });
   });
