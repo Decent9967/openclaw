@@ -14,7 +14,7 @@ type StreamingSessionStub = {
   credentials: unknown;
   start: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
-  observeContentAcceptance: ReturnType<typeof vi.fn>;
+  registerContentObserver: ReturnType<typeof vi.fn>;
   closeWithResult: Mock<FeishuStreamingSession["closeWithResult"]>;
   discard: Mock<FeishuStreamingSession["discard"]>;
   isActive: ReturnType<typeof vi.fn>;
@@ -140,7 +140,7 @@ vi.mock("./streaming-card.js", () => {
         this.active = true;
       });
       update = vi.fn(async () => {});
-      observeContentAcceptance = vi.fn(async (): Promise<boolean> => true);
+      registerContentObserver = vi.fn(async (): Promise<boolean> => true);
       closeWithResult = vi.fn<FeishuStreamingSession["closeWithResult"]>(async (text, _options) => {
         this.active = false;
         return {
@@ -4675,14 +4675,14 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       const session = requireStreamingInstance(0);
       await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
 
-      session.observeContentAcceptance.mockResolvedValueOnce(false);
+      session.registerContentObserver.mockResolvedValueOnce(false);
       const acknowledged = await result.replyOptions.onToolStart?.({
         name: "web_search",
         phase: "start",
         args: { query: "openclaw" },
       });
       expect(acknowledged).toBe(false);
-      const rejectedText = session.observeContentAcceptance.mock.calls.at(-1)?.[0];
+      const rejectedText = session.registerContentObserver.mock.calls.at(-1)?.[0];
 
       // The rejected publication must stay unacknowledged, so the identical
       // event republishes the same draft instead of being deduped away.
@@ -4692,7 +4692,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
         args: { query: "openclaw" },
       });
       expect(retried).toBe(true);
-      expect(session.observeContentAcceptance.mock.calls.at(-1)?.[0]).toBe(rejectedText);
+      expect(session.registerContentObserver.mock.calls.at(-1)?.[0]).toBe(rejectedText);
     });
 
     it("coalesces rapid publications without serializing confirmation waits", async () => {
@@ -4701,7 +4701,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       const session = requireStreamingInstance(0);
       await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
       session.update.mockClear();
-      session.observeContentAcceptance.mockClear();
+      session.registerContentObserver.mockClear();
 
       // A burst of publications: each write enters the session's pendingText
       // snapshot slot immediately — the queue never waits for one snapshot's
@@ -4712,9 +4712,9 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
         result.replyOptions.onToolStart?.({ name: "exec", phase: "start" }),
       ]);
 
-      expect(session.observeContentAcceptance).toHaveBeenCalledTimes(3);
+      expect(session.registerContentObserver).toHaveBeenCalledTimes(3);
       expect(session.update.mock.calls.at(-1)?.[0]).toBe(
-        session.observeContentAcceptance.mock.calls.at(-1)?.[0],
+        session.registerContentObserver.mock.calls.at(-1)?.[0],
       );
     });
 

@@ -591,19 +591,16 @@ export class FeishuStreamingSession {
     await this.flushPendingUpdate();
   }
 
-  // Resolves with confirmed transport acceptance for an already-submitted
-  // text without writing again, so publication caching upstream (the
-  // progress-draft compositor) never advances on a write the card API
-  // rejected. Callers observe after update(); the waiter settles at the flush
-  // cycle that attempts the text, and a superseded snapshot resolves false so
-  // the compositor can re-publish from its own dedupe state.
-  observeContentAcceptance(text: string): Promise<boolean> {
+  // Parks a waiter for an upcoming write of `text` and resolves with the
+  // transport outcome of the flush cycle that attempts it: rejected writes
+  // report false so publication caching upstream (the progress-draft
+  // compositor) keeps the draft unacknowledged, superseded snapshots resolve
+  // false for the same reason. Callers register BEFORE update() — an
+  // immediate rejected attempt settles observers inside update() and never
+  // schedules another cycle, so a later registration could never settle.
+  registerContentObserver(text: string): Promise<boolean> {
     if (!this.state || this.closed) {
       return Promise.resolve(false);
-    }
-    if (this.pendingText === null) {
-      // Nothing is pending: the latest flush already attempted this text.
-      return Promise.resolve(this.state.sentText === text);
     }
     return new Promise<boolean>((resolve) => {
       this.contentFlushWaiters.push({ text, resolve });

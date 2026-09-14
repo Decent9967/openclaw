@@ -400,6 +400,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     const session = streaming;
     const generation = activeStreamingGeneration;
     const startPromise = streamingStartPromise;
+    let observed: Promise<boolean> | undefined;
     // The serialization chain carries only the write itself: update() parks
     // the snapshot in the session's pendingText and returns, so rapid
     // snapshots coalesce to the latest one instead of each waiting out a
@@ -410,7 +411,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       }
       // Updates queued before close owns the captured session; updates queued after the
       // generation is sealed have no owner and cannot race provider finalization.
-      if (generation !== undefined && session?.isActive()) {
+      if (generation !== undefined && session?.isActive() && combined) {
+        // Observation registers BEFORE the write: an immediate rejected
+        // attempt settles its observers inside update() without scheduling
+        // another cycle, so a registration made afterwards could never
+        // settle and the progress callback would hang.
+        observed = session.registerContentObserver(combined);
         await session.update(combined);
       }
     });
@@ -419,16 +425,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       () => undefined,
       () => undefined,
     );
-    // Acceptance is observed off the chain: it resolves once a flush cycle
-    // attempts this exact text, so a rejected write reports false and the
-    // compositor keeps the publication unacknowledged — without delaying the
-    // next snapshot behind that observation.
-    return chained.then(async () => {
-      if (generation === undefined || !session?.isActive()) {
-        return false;
-      }
-      return await session.observeContentAcceptance(combined);
-    });
+    // Acceptance resolves off the coalescing chain: a rejected write reports
+    // false so the compositor keeps the publication unacknowledged, without
+    // delaying the next snapshot behind that observation.
+    return chained.then(() => observed ?? false);
   };
 
   const queueStreamingUpdate = (

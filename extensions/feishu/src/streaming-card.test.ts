@@ -758,9 +758,11 @@ describe("FeishuStreamingSession", () => {
     });
 
     // Outside the throttle window so the write is attempted at once.
+    // Production registers the observer before the write: an immediate
+    // rejected attempt settles it inside update() with no later cycle.
     vi.setSystemTime(2_000);
+    const observed = session.registerContentObserver("draft A");
     const write = session.update("draft A");
-    const observed = session.observeContentAcceptance("draft A");
     await vi.advanceTimersByTimeAsync(0);
     await write;
     await expect(observed).resolves.toBe(false);
@@ -768,8 +770,8 @@ describe("FeishuStreamingSession", () => {
 
     // The caller-driven retry of the identical text is what proves the
     // rejection was not cached as rendered.
+    const retryObserved = session.registerContentObserver("draft A");
     const retryWrite = session.update("draft A");
-    const retryObserved = session.observeContentAcceptance("draft A");
     await vi.advanceTimersByTimeAsync(200);
     await retryWrite;
     await expect(retryObserved).resolves.toBe(true);
@@ -799,8 +801,8 @@ describe("FeishuStreamingSession", () => {
       lastUpdateTime: 1_000,
     });
 
+    const observed = session.registerContentObserver("throttled draft");
     const write = session.update("throttled draft");
-    const observed = session.observeContentAcceptance("throttled draft");
     await vi.advanceTimersByTimeAsync(200);
     await write;
     await expect(observed).resolves.toBe(true);
@@ -830,8 +832,8 @@ describe("FeishuStreamingSession", () => {
       lastUpdateTime: 1_000,
     });
 
+    const observed = session.registerContentObserver("never lands");
     const write = session.update("never lands");
-    const observed = session.observeContentAcceptance("never lands");
     await session.closeWithResult("final answer");
     await write;
     await expect(observed).resolves.toBe(false);
@@ -862,16 +864,14 @@ describe("FeishuStreamingSession", () => {
 
     // Rapid snapshots all land inside one throttle window; only the latest
     // reaches the card, while every observer still learns its own outcome.
-    const writes = [
-      session.update("snapshot one"),
-      session.update("snapshot two"),
-      session.update("snapshot three"),
-    ];
-    const first = session.observeContentAcceptance("snapshot one");
-    const second = session.observeContentAcceptance("snapshot two");
-    const third = session.observeContentAcceptance("snapshot three");
+    const first = session.registerContentObserver("snapshot one");
+    const w1 = session.update("snapshot one");
+    const second = session.registerContentObserver("snapshot two");
+    const w2 = session.update("snapshot two");
+    const third = session.registerContentObserver("snapshot three");
+    const w3 = session.update("snapshot three");
     await vi.advanceTimersByTimeAsync(200);
-    await Promise.all(writes);
+    await Promise.all([w1, w2, w3]);
     await expect(third).resolves.toBe(true);
     await expect(second).resolves.toBe(false);
     await expect(first).resolves.toBe(false);
