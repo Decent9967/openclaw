@@ -4597,6 +4597,37 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       expect(session.update.mock.calls.length).toBe(updatesAtFinal);
     });
 
+    it("renders narration preambles as commentary lines in the rolling draft", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+
+      await result.replyOptions.onItemEvent?.({
+        kind: "preamble",
+        itemId: "item-1",
+        phase: "update",
+        progressText: "先检索国内方案，再查海外主流平台",
+      });
+      await vi.waitFor(() => {
+        const latest = String(session.update.mock.calls.at(-1)?.[0]);
+        expect(latest).toContain("💬");
+        expect(latest).toContain("先检索国内方案");
+      });
+
+      // Growing narration for the same item updates the line in place.
+      await result.replyOptions.onItemEvent?.({
+        kind: "preamble",
+        itemId: "item-1",
+        phase: "end",
+        progressText: "资料齐了，开始整理对比",
+      });
+      await vi.waitFor(() => {
+        const latest = String(session.update.mock.calls.at(-1)?.[0]);
+        expect(latest).toContain("资料齐了");
+      });
+    });
+
     it("keeps progress callbacks unregistered while modifying hooks are active", async () => {
       getGlobalHookRunnerMock.mockReturnValue({
         hasHooks: vi.fn((name: string) => name === "reply_payload_sending"),

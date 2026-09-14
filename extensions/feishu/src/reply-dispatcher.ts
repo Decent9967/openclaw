@@ -1748,9 +1748,25 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             commandBearing?: boolean;
           }) => {
             if (payload.kind === "preamble") {
-              return progressCompositor.pushPreambleHeadline(payload.progressText, {
-                itemId: payload.itemId,
-              });
+              // Narration text the model authors between tool calls. The shared
+              // headline lane is progress-mode only, so in partial mode render it
+              // as a stable 💬 line in the rolling draft instead: process text
+              // stays visually separate from the final answer.
+              const text = payload.progressText?.trim();
+              if (!text) {
+                return false;
+              }
+              return progressCompositor.pushToolProgress(
+                {
+                  ...(payload.itemId ? { id: `commentary:${payload.itemId}` } : {}),
+                  kind: "item",
+                  icon: "💬",
+                  label: "",
+                  detail: text,
+                  prefix: false,
+                },
+                { startImmediately: true },
+              );
             }
             return progressCompositor.pushItemEvent(payload);
           }
