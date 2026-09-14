@@ -6,12 +6,23 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createStubChild } from "./child.test-support.js";
 
-const { spawnWithFallbackMock } = vi.hoisted(() => ({
+const { spawnWithFallbackMock, signalProcessTreeMock } = vi.hoisted(() => ({
   spawnWithFallbackMock: vi.fn(),
+  // The synthetic PID must never reach the host's process groups; the mock
+  // mirrors the real completion-callback contract instead.
+  signalProcessTreeMock: vi.fn(
+    (_pid: number, _signal: string, opts?: { onComplete?: () => void }) => {
+      opts?.onComplete?.();
+    },
+  ),
 }));
 
 vi.mock("../../spawn-utils.js", () => ({
   spawnWithFallback: spawnWithFallbackMock,
+}));
+
+vi.mock("../../kill-tree.js", () => ({
+  signalProcessTree: signalProcessTreeMock,
 }));
 
 let createChildAdapter: typeof import("./child.js").createChildAdapter;
@@ -78,6 +89,7 @@ describe("post-exit drain settlement for detached grandchildren", () => {
     emitExit(null, "SIGTERM");
     await vi.advanceTimersByTimeAsync(1000);
     expect(settled).not.toHaveBeenCalled();
+    expect(signalProcessTreeMock).toHaveBeenCalledWith(1234, "SIGTERM", expect.anything());
 
     // The supervisor escalates to a hard kill; that path arms its own
     // fallback and settles the wait on its schedule, not the idle cap's.
