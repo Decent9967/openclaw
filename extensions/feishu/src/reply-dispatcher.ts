@@ -7,10 +7,10 @@ import {
 } from "openclaw/plugin-sdk/channel-inbound";
 import {
   createChannelMessageReplyPipeline,
-  formatChannelProgressDraftLineForEntry,
-  isChannelProgressDraftWorkToolName,
+  createChannelProgressDraftCompositor,
   resolveChannelPreviewStreamMode,
   resolveChannelStreamingBlockEnabled,
+  type AgentPlanStep,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { toStringifiedError as toFeishuError } from "openclaw/plugin-sdk/error-runtime";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
@@ -35,6 +35,7 @@ import {
   renderFeishuReplyPayload,
   withinCardTableLimit,
 } from "./presentation-card.js";
+import { buildFeishuCompactionProgressLine } from "./progress-draft.js";
 import {
   createFeishuPartialReplyDeliveryError,
   createFeishuReplyDeliveryResult,
@@ -281,12 +282,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const chunkMode = core.channel.text.resolveChunkMode(cfg, "feishu", accountId);
   const tableMode = core.channel.text.resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const renderMode = account.config?.renderMode ?? "auto";
+  const streamMode = resolveChannelPreviewStreamMode(account.config, "partial");
   // Streaming cards cannot attach native mention recipients. Bot-authored ingress
   // therefore uses normal cards/posts so every emitted unit reaches the peer bot.
   const streamingEnabled =
-    !requiredMentionTargets?.length &&
-    resolveChannelPreviewStreamMode(account.config, "partial") !== "off" &&
-    renderMode !== "raw";
+    !requiredMentionTargets?.length && streamMode !== "off" && renderMode !== "raw";
   const hookRunner = getGlobalHookRunner();
   const modifyingHooksRegistered =
     (hookRunner?.hasHooks("reply_payload_sending") ?? false) ||
@@ -667,6 +667,13 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const closeStreaming = (
     disposition: StreamingDisposition = "closed",
   ): Promise<StreamingCloseOutcome> => {
+    // A committed final owns the card from here on; the progress draft must
+    // stop accepting events so a late tool line cannot start a phantom card.
+    // A discarded preview may be a mid-turn retraction, so the draft stays
+    // armed and later work events may open a fresh card.
+    if (disposition === "closed") {
+      progressCompositor.markFinalReplyStarted();
+    }
     const session = streaming;
     const generation = activeStreamingGeneration;
     // Closing seals the active generation before awaiting I/O. The captured session,
@@ -734,19 +741,32 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     }
   };
 
-  const updateStreamingStatusLine = (
-    nextStatusLine: string,
-    options?: { startIfNeeded?: boolean },
-  ) => {
-    statusLine = nextStatusLine;
-    const hasStreamingSession = Boolean(streaming?.isActive() || streamingStartPromise);
-    if (!hasStreamingSession && (options?.startIfNeeded === false || renderMode !== "card")) {
-      return false;
-    }
-    startStreaming();
-    flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
-    return false;
-  };
+  // Shared progress-draft compositor (same engine as Telegram/Discord/Slack/
+  // Mattermost/MS Teams progress drafts). The composed draft text lives in the
+  // card's status slot: it starts the card on the first work event, updates it
+  // as tool lines/plan steps/approvals arrive, and performStreamingClose already
+  // clears the slot so the finalized card carries only the committed answer.
+  const progressCompositor = createChannelProgressDraftCompositor({
+    entry: account.config,
+    mode: streamMode,
+    active: previewStreamingEnabled,
+    seed: `${account.accountId}:${sendTarget}`,
+    update: (draftText) => {
+      statusLine = draftText;
+      startStreaming();
+      flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+      return Boolean(streaming || streamingStartPromise);
+    },
+    deleteCurrent: async () => {
+      statusLine = "";
+      if (!streamText && !reasoningText) {
+        await discardStreamingPreview();
+        return;
+      }
+      flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+    },
+    shouldStartNow: (line) => typeof line !== "string" && line?.kind === "tool",
+  });
 
   const sendChunkedTextReply = async (paramsLocal: {
     text: string;
@@ -1693,35 +1713,100 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             phase?: string;
             args?: Record<string, unknown>;
             detailMode?: "explain" | "raw";
+          }) => progressCompositor.pushToolEvent(payload)
+        : undefined,
+      onItemEvent: previewStreamingEnabled
+        ? (payload: {
+            itemId?: string;
+            kind?: string;
+            title?: string;
+            phase?: string;
+            status?: string;
+            toolCallId?: string;
+            name?: string;
+            summary?: string;
+            progressText?: string;
+            meta?: string;
+            commandBearing?: boolean;
           }) => {
-            if (!isChannelProgressDraftWorkToolName(payload.name)) {
-              return false;
+            if (payload.kind === "preamble") {
+              return progressCompositor.pushPreambleHeadline(payload.progressText, {
+                itemId: payload.itemId,
+              });
             }
-            const statusLineLocal = formatChannelProgressDraftLineForEntry(
-              account.config,
-              {
-                event: "tool",
-                name: payload.name,
-                phase: payload.phase,
-                args: payload.args,
-              },
-              {
-                detailMode: payload.detailMode,
-              },
-            );
-            if (statusLineLocal) {
-              return updateStreamingStatusLine(statusLineLocal);
-            }
+            return progressCompositor.pushItemEvent(payload);
+          }
+        : undefined,
+      onPlanUpdate: previewStreamingEnabled
+        ? (payload: {
+            phase?: string;
+            steps?: AgentPlanStep[];
+            explanation?: string;
+            explanationFormat?: "plain";
+          }) =>
+            payload.phase === "update"
+              ? progressCompositor.pushPlanProgress(payload.steps, {
+                  explanation: payload.explanation,
+                  explanationFormat: payload.explanationFormat,
+                })
+              : false
+        : undefined,
+      onApprovalEvent: previewStreamingEnabled
+        ? (payload: {
+            approvalId?: string;
+            phase?: string;
+            title?: string;
+            command?: string;
+            reason?: string;
+            message?: string;
+          }) => progressCompositor.pushApprovalEvent(payload)
+        : undefined,
+      onCommandOutput: previewStreamingEnabled
+        ? (payload: {
+            itemId?: string;
+            toolCallId?: string;
+            phase?: string;
+            title?: string;
+            name?: string;
+            status?: string;
+            exitCode?: number | null;
+          }) => progressCompositor.pushCommandOutputEvent(payload)
+        : undefined,
+      onPatchSummary: previewStreamingEnabled
+        ? (payload: {
+            itemId?: string;
+            toolCallId?: string;
+            phase?: string;
+            title?: string;
+            name?: string;
+            added?: string[];
+            modified?: string[];
+            deleted?: string[];
+            summary?: string;
+          }) => progressCompositor.pushPatchEvent(payload)
+        : undefined,
+      onAssistantMessageStart: previewStreamingEnabled
+        ? () => {
+            progressCompositor.beginAssistantMessage();
             return false;
           }
         : undefined,
-      onAssistantMessageStart: previewStreamingEnabled
-        ? () => updateStreamingStatusLine("", { startIfNeeded: false })
-        : undefined,
       onCompactionStart: previewStreamingEnabled
-        ? () => updateStreamingStatusLine("📦 **Compacting context...**")
+        ? () =>
+            progressCompositor.pushToolProgress(buildFeishuCompactionProgressLine("start"), {
+              startImmediately: true,
+              flush: true,
+            })
         : undefined,
-      onCompactionEnd: previewStreamingEnabled ? () => updateStreamingStatusLine("") : undefined,
+      onCompactionEnd: previewStreamingEnabled
+        ? (payload?: { completed?: boolean }) =>
+            progressCompositor.pushToolProgress(
+              buildFeishuCompactionProgressLine(
+                payload?.completed === false ? "incomplete" : "complete",
+              ),
+              { startImmediately: true, flush: true },
+            )
+        : undefined,
     },
     ensureNoVisibleReplyFallback,
     getVisibleReplyState: () => ({

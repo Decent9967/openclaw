@@ -201,14 +201,14 @@ Discord defaults to `off` when `streaming` is unset, Telegram and Slack default
 to `progress`, and Mattermost and MS Teams default to `partial`. Feishu (the
 bundled `extensions/feishu` channel) defaults to `partial` in direct chats.
 
-| Channel    | `off`         | `partial`                                                                                                                                          | `block` | `progress`                         |
-| ---------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------- |
-| Telegram   | Yes           | Yes                                                                                                                                                | Yes     | editable progress draft (default)  |
-| Discord    | Yes (default) | Yes                                                                                                                                                | Yes     | editable progress draft (opt-in)   |
-| Slack      | Yes           | Yes                                                                                                                                                | Yes     | Block Kit session card (default)   |
-| Mattermost | Yes           | Yes                                                                                                                                                | Yes     | Yes                                |
-| MS Teams   | Yes           | Yes                                                                                                                                                | Yes     | native progress stream             |
-| Feishu     | Yes           | Yes (card edits; unavailable for replies that must carry outbound bot mentions, for `renderMode: "raw"`, and while modifying hooks are registered) | Yes     | card status line for running tools |
+| Channel    | `off`         | `partial`                                                                                                                                          | `block` | `progress`                           |
+| ---------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------ |
+| Telegram   | Yes           | Yes                                                                                                                                                | Yes     | editable progress draft (default)    |
+| Discord    | Yes (default) | Yes                                                                                                                                                | Yes     | editable progress draft (opt-in)     |
+| Slack      | Yes           | Yes                                                                                                                                                | Yes     | Block Kit session card (default)     |
+| Mattermost | Yes           | Yes                                                                                                                                                | Yes     | Yes                                  |
+| MS Teams   | Yes           | Yes                                                                                                                                                | Yes     | native progress stream               |
+| Feishu     | Yes           | Yes (card edits; unavailable for replies that must carry outbound bot mentions, for `renderMode: "raw"`, and while modifying hooks are registered) | Yes     | progress draft on the streaming card |
 
 Block streaming resolves per channel: an explicit
 `channels.<channel>.streaming.block.enabled` always wins; when it is unset, a
@@ -360,7 +360,7 @@ result is still delivered normally to the model.
 
 Supported surfaces:
 
-- **Discord**, **Slack**, **Telegram**, and **Matrix** stream tool-progress and
+- **Discord**, **Slack**, **Telegram**, **Matrix**, and **Feishu** stream tool-progress and
   Codex preamble updates into the live preview edit by default when preview
   streaming is active. Microsoft Teams uses its native progress stream in
   personal chats.

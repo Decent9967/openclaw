@@ -4501,5 +4501,76 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
     });
   });
+
+  describe("progress draft compositor", () => {
+    it("starts the streaming card on the first tool event and rolls progress text", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({
+        name: "web_search",
+        phase: "start",
+        args: { query: "openclaw feishu" },
+      });
+      const session = requireStreamingInstance(0);
+      expect(session.start).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+      expect(String(session.update.mock.calls[0]?.[0]).length).toBeGreaterThan(0);
+
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      await vi.waitFor(() => expect(session.update.mock.calls.length).toBeGreaterThan(1));
+    });
+
+    it("renders plan checklist steps on the streaming card", async () => {
+      const { result } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      await result.replyOptions.onPlanUpdate?.({
+        phase: "update",
+        steps: [
+          { step: "Search docs", status: "completed" },
+          { step: "Write patch", status: "in_progress" },
+        ],
+      });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => {
+        const latest = String(session.update.mock.calls.at(-1)?.[0]);
+        expect(latest).toContain("Search docs");
+        expect(latest).toContain("Write patch");
+      });
+    });
+
+    it("finalizes the card with the answer only and stops the draft at final delivery", async () => {
+      const { result, options } = createDispatcherHarness();
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      const session = requireStreamingInstance(0);
+      await vi.waitFor(() => expect(session.update).toHaveBeenCalled());
+
+      const delivery = await options.deliver({ text: "Final answer" }, { kind: "final" });
+      await options.onIdle?.();
+      await delivery?.finalization;
+      expect(session.closeWithResult).toHaveBeenCalledWith("Final answer", expect.anything());
+      const updatesAtFinal = session.update.mock.calls.length;
+
+      await result.replyOptions.onToolStart?.({ name: "bash", phase: "start" });
+      await new Promise((resolve) => {
+        setTimeout(resolve, 20);
+      });
+      expect(streamingInstances).toHaveLength(1);
+      expect(session.update.mock.calls.length).toBe(updatesAtFinal);
+    });
+
+    it("keeps progress callbacks unregistered while modifying hooks are active", async () => {
+      getGlobalHookRunnerMock.mockReturnValue({
+        hasHooks: vi.fn((name: string) => name === "reply_payload_sending"),
+      });
+      const { result } = createDispatcherHarness();
+      expect(result.replyOptions.onToolStart).toBeUndefined();
+      expect(result.replyOptions.onItemEvent).toBeUndefined();
+      expect(result.replyOptions.onPlanUpdate).toBeUndefined();
+      expect(result.replyOptions.onApprovalEvent).toBeUndefined();
+      expect(result.replyOptions.onCommandOutput).toBeUndefined();
+      expect(result.replyOptions.onPatchSummary).toBeUndefined();
+      expect(result.replyOptions.onCompactionStart).toBeUndefined();
+      expect(streamingInstances).toHaveLength(0);
+    });
+  });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
