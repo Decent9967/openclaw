@@ -420,10 +420,8 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
         schedulePostExitCloseSettlement();
         return;
       }
-      // Settle without destroying: capture subscribers keep receiving
-      // descendant output, writers cannot hit EPIPE from the cutoff, and the
-      // adapter stays cancellable while a detached descendant finishes its
-      // own lifecycle. The pipes close naturally when the descendant exits.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       settleObservedClose(resolveObservedExitState(exitState));
     }, POST_EXIT_CLOSE_SETTLE_MS);
     postExitCloseSettlementTimer.unref?.();
