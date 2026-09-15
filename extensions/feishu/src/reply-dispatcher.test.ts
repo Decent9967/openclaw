@@ -1567,7 +1567,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
 
     const { result } = createDispatcherHarness();
     expect(result.replyOptions).toHaveProperty("disableBlockStreaming", true);
-    expect(result.replyOptions).toHaveProperty("suppressDefaultToolProgressMessages", true);
+    expect(result.replyOptions).toHaveProperty("suppressToolProgressMessages", true);
   });
 
   it("keeps core default progress messages while inherited blocks carry them", () => {
@@ -1586,7 +1586,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
     });
     expect(result.replyOptions).toHaveProperty("disableBlockStreaming", false);
-    expect(result.replyOptions).toHaveProperty("suppressDefaultToolProgressMessages", false);
+    expect(result.replyOptions).toHaveProperty("suppressToolProgressMessages", false);
   });
 
   it("enables core block streaming when Feishu blockStreaming is explicitly true", async () => {

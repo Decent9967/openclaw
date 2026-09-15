@@ -1717,14 +1717,16 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       onModelSelected,
       disableBlockStreaming: !blockStreamingEnabled,
       // The streaming card's progress draft owns tool-progress display while the
-      // preview is active, and block delivery owns it while blocks are enabled;
-      // core only forwards quiet progress callbacks (onToolStart, onItemEvent,
-      // onPlanUpdate, onCommandOutput, compaction) to channels that declare
-      // ownership this way. With preview and blocks both off, nothing renders
-      // mid-turn progress, so core defaults must be suppressed here too —
-      // otherwise an explicit channel block-off keeps emitting mid-turn
-      // progress messages when no preview card can render.
-      suppressDefaultToolProgressMessages: previewStreamingEnabled || !blockStreamingEnabled,
+      // preview is active; core only forwards quiet progress callbacks
+      // (onToolStart, onItemEvent, onPlanUpdate, onCommandOutput, compaction)
+      // to channels that declare ownership this way.
+      suppressDefaultToolProgressMessages: previewStreamingEnabled,
+      // Verbose progress text (narration, tool lines) is gated by this flag,
+      // not the Default one above: with preview and blocks both off nothing
+      // renders mid-turn progress, so ask dispatch to skip those messages —
+      // otherwise an explicit channel block-off keeps emitting them when no
+      // preview card can render.
+      suppressToolProgressMessages: !previewStreamingEnabled && !blockStreamingEnabled,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {
