@@ -402,7 +402,7 @@ function setupFeishuTrace(recorder: WireRecorder, scenario: DeliveryTraceScenari
         await created.delivery.deliver({ text: step.text }, { kind: "block" });
         break;
       case "tool-progress":
-        created.replyOptions.onToolStart?.({ name: step.name, phase: step.phase });
+        await created.replyOptions.onToolStart?.({ name: step.name, phase: step.phase });
         break;
       case "final":
         await created.delivery.deliver(

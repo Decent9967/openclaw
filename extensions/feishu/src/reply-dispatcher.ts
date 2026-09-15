@@ -466,7 +466,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       }
       lastSnapshotTextLength = nextText.length;
     }
-    flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+    void flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
   };
 
   const queueReasoningUpdate = (nextThinking: string) => {
@@ -474,7 +474,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       return;
     }
     reasoningText = nextThinking;
-    flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+    void flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
   };
 
   const startStreaming = () => {
@@ -804,7 +804,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         await discardStreamingPreview();
         return;
       }
-      flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+      void flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
     },
     shouldStartNow: (line) => typeof line !== "string" && line?.kind === "tool",
   });
@@ -1620,7 +1620,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               hasStreamingFinalText = true;
               snapshotBaseText = "";
               lastSnapshotTextLength = text.length;
-              flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+              void flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
             }
           }
           // Send media even when streaming handled the text

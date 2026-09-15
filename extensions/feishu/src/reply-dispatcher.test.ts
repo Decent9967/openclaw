@@ -3714,8 +3714,8 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onToolStart?.({ name: "web_search" });
-    result.replyOptions.onPartialReply?.({ text: "final answer" });
+    void result.replyOptions.onToolStart?.({ name: "web_search" });
+    void result.replyOptions.onPartialReply?.({ text: "final answer" });
     await options.onIdle?.();
 
     const updateTexts = streamingUpdateTexts();
@@ -3743,12 +3743,12 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onToolStart?.({
+    void result.replyOptions.onToolStart?.({
       name: "exec",
       args: { command: "pnpm test -- --watch=false" },
       detailMode: "raw",
     });
-    result.replyOptions.onPartialReply?.({ text: "final answer" });
+    void result.replyOptions.onPartialReply?.({ text: "final answer" });
     await options.onIdle?.();
 
     const updateTexts = streamingUpdateTexts();
@@ -3762,8 +3762,8 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onToolStart?.({ name: "message" });
-    result.replyOptions.onPartialReply?.({ text: "final answer" });
+    void result.replyOptions.onToolStart?.({ name: "message" });
+    void result.replyOptions.onPartialReply?.({ text: "final answer" });
     await options.onIdle?.();
 
     const updateTexts = streamingUpdateTexts();
