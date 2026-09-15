@@ -40,7 +40,11 @@ import { OpenClawLightDomElement } from "../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../lit/subscriptions-controller.ts";
 import type { ChatPage } from "../pages/chat/chat-page.ts";
 import type { NewSessionTarget } from "../pages/new-session/location.ts";
-import { selectShellRouteState, type ShellRouteState } from "./app-host-route-state.ts";
+import {
+  equalShellRouteState,
+  selectShellRouteState,
+  type ShellRouteState,
+} from "./app-host-route-state.ts";
 import { OpenClawApp } from "./app-root.ts";
 import { ShellChromeOwner, type ShellChromeHost } from "./app-shell-chrome.ts";
 import {
@@ -95,21 +99,6 @@ i18n.setLocaleLoadRecovery({
     void scheduleStaleChunkReload();
   },
 });
-
-function equalShellRouteState(previous: ShellRouteState, next: ShellRouteState): boolean {
-  return (
-    previous.routeId === next.routeId &&
-    previous.routeFailed === next.routeFailed &&
-    previous.location?.pathname === next.location?.pathname &&
-    previous.location?.search === next.location?.search &&
-    previous.location?.hash === next.location?.hash &&
-    previous.committedRouteId === next.committedRouteId &&
-    previous.committedLocation?.pathname === next.committedLocation?.pathname &&
-    previous.committedLocation?.search === next.committedLocation?.search &&
-    previous.committedLocation?.hash === next.committedLocation?.hash &&
-    previous.committedSessionKey === next.committedSessionKey
-  );
-}
 
 class OpenClawShell
   extends OpenClawLightDomElement
@@ -317,6 +306,28 @@ class OpenClawShell
           };
         },
       )
+      .effect(
+        () => this.context,
+        (context) => {
+          const startedAt = Date.now();
+          let active = true;
+          let disconnect: (() => void) | undefined;
+          const runtime = createIdleImport(
+            () => import("./control-ui-favicon-status.runtime.ts"),
+            ({ connectControlUiFavicon }) => {
+              if (active) {
+                disconnect = connectControlUiFavicon(this, context, startedAt);
+              }
+            },
+          );
+          runtime.schedule();
+          return () => {
+            active = false;
+            runtime.dispose();
+            disconnect?.();
+          };
+        },
+      )
       .watch(
         () => this.context?.nativeDeviceSettings,
         (settings, notify) => settings.subscribe(notify),
@@ -332,6 +343,14 @@ class OpenClawShell
       .watch(
         () => this.context?.agentSelection,
         (selection, notify) => selection.subscribe(notify),
+      )
+      .watch(
+        () => this.context?.settingsAgentSelection,
+        (selection, notify) => selection.subscribe(notify),
+      )
+      .watch(
+        () => this.context?.agentIdentity,
+        (identity, notify) => identity.subscribe(notify),
       )
       .watch(
         () => this.context?.gateway,
@@ -667,6 +686,9 @@ class OpenClawShell
     const context = this.context;
     if (!context) {
       return;
+    }
+    if (this.querySelector(".settings-sidebar__agent")) {
+      void context.agentIdentity.ensure([context.settingsAgentSelection.state.selectedId]);
     }
     if (this.workspaceChromeVisible) {
       this.shellChrome.panels.restore();

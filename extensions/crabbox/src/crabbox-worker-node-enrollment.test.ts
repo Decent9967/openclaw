@@ -65,6 +65,8 @@ const state = process.env.OPENCLAW_STATE_DIR;
 if (args[0] === "--version") {
   console.log("OpenClaw 2026.8.1");
 } else if (args[0] === "plugins" && args[1] === "enable") {
+  fs.appendFileSync(path.join(state, "activation.jsonl"), JSON.stringify({ runtimePublished: fs.existsSync(path.join(state, "runtime")) }) + "\\n");
+  if (${JSON.stringify(build)} === "activation-failed") process.exit(1);
   fs.appendFileSync(path.join(state, "enabled"), args[2] + "\\n");
 } else {
   process.title = "openclaw-connect";
@@ -195,6 +197,7 @@ async function serveArtifact(
 
 type DesktopFixture = {
   enabled: boolean;
+  setup?: string;
   display?: string;
   dbus?: string;
   runtimeDir?: string;
@@ -211,7 +214,7 @@ async function enroll(
   const bin = path.join(home, "bin");
   const proc = path.join(home, "proc");
   if (desktop) {
-    fs.mkdirSync(bin);
+    fs.mkdirSync(bin, { recursive: true });
     fs.mkdirSync(path.join(proc, "123"), { recursive: true });
     fs.writeFileSync(path.join(home, "desktop.env"), "CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n");
     fs.writeFileSync(
@@ -241,6 +244,7 @@ echo 123
     : createCrabboxNodeEnrollmentSetup({
         leaseId,
         desktop: desktop?.enabled,
+        desktopSetup: desktop?.setup,
         enrollment: {
           mode: "connect",
           setupCode,
@@ -453,6 +457,44 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
     expect(Object.keys(openCrabboxWarmImageStore().entries()[0]!.value.allocations)).toEqual([]);
   }, 60_000);
 
+  it.each(["file", "directory"] as const)(
+    "rejects an occupied runtime %s before plugin activation",
+    async (kind) => {
+      const { home, stateDir } = testHome();
+      fs.mkdirSync(stateDir, { recursive: true });
+      const pointer = path.join(stateDir, "runtime");
+      if (kind === "directory") {
+        fs.mkdirSync(pointer);
+      }
+      const retained = kind === "directory" ? path.join(pointer, "keep") : pointer;
+      fs.writeFileSync(retained, "retained fixture");
+      const { nodeBootstrap } = await serveArtifact(await packageFixture("occupied"));
+      const result = await enroll(home, nodeBootstrap);
+      expect(result).toMatchObject({
+        code: 1,
+        output: expect.stringContaining("runtime pointer is occupied"),
+      });
+      expect(fs.readFileSync(retained, "utf8")).toBe("retained fixture");
+      expect(fs.existsSync(path.join(stateDir, "activation.jsonl"))).toBe(false);
+      expect(fs.existsSync(path.join(stateDir, "node.pid"))).toBe(false);
+    },
+  );
+
+  it("leaves the runtime pointer unpublished when plugin activation fails", async () => {
+    const { home, stateDir } = testHome();
+    const { nodeBootstrap } = await serveArtifact(await packageFixture("activation-failed"));
+    const result = await enroll(home, nodeBootstrap);
+    expect(result).toMatchObject({
+      code: 1,
+      output: expect.stringContaining("could not enable plugin"),
+    });
+    expect(fs.existsSync(path.join(stateDir, "runtime"))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, "node.pid"))).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "activation.jsonl"), "utf8"))).toEqual({
+      runtimePublished: false,
+    });
+  });
+
   it("rejects malformed forwarded credentials without disclosing their value", async () => {
     const { home } = testHome();
     const { nodeBootstrap, authorizations } = await serveArtifact(
@@ -594,6 +636,12 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
       JSON.parse(fs.readFileSync(path.join(path.dirname(launch.cli), "installed.json"), "utf8")),
     ).toEqual({ scriptsRan: true });
     expect(fs.readFileSync(path.join(stateDir, "enabled"), "utf8")).toBe("demo\n");
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "activation.jsonl"), "utf8"))).toEqual({
+      runtimePublished: false,
+    });
+    expect(fs.realpathSync(path.join(stateDir, "runtime"))).toBe(
+      path.dirname(path.dirname(path.dirname(launch.cli))),
+    );
     expect(fs.readdirSync(stateDir).some((name) => name.startsWith("node-bootstrap-"))).toBe(false);
     expect(authorizations).toEqual([`Bearer ${nodeBootstrap.token}`]);
     stop();
@@ -729,6 +777,48 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
 const hasBashMapfile = spawnSync("bash", ["-c", "type mapfile"], { encoding: "utf8" }).status === 0;
 
 describe.runIf(hasBashMapfile)("Crabbox desktop node bootstrap", () => {
+  it.each([0, 19])(
+    "finishes desktop setup after launch and on live replay (initial exit %s)",
+    async (exitCode) => {
+      const { home, stateDir } = testHome();
+      const { nodeBootstrap, authorizations } = await serveArtifact(
+        await packageFixture("desktop"),
+      );
+      const setup = `set -eu
+[ -z "\${CRABBOX_WORKER_BOOTSTRAP_TOKEN-}" ]
+[ -z "\${CRABBOX_WORKER_SETUP_CODE-}" ]
+[ "$DISPLAY" = :99 ]
+[ "$DBUS_SESSION_BUS_ADDRESS" = unix:path=/run/fixture/bus ]
+for attempt in {1..200}; do
+  [ -f "$OPENCLAW_STATE_DIR/launch.json" ] && break
+  sleep 0.025
+done
+[ -f "$OPENCLAW_STATE_DIR/launch.json" ]
+IFS= read -r pid < "$OPENCLAW_STATE_DIR/node.pid"
+kill -0 "$pid"
+echo "$pid" >> "$OPENCLAW_STATE_DIR/desktop-pids"
+# ${"x".repeat(160_000)}
+`;
+      const first = await enroll(home, nodeBootstrap, {
+        enabled: true,
+        setup: `${setup}exit ${exitCode}\n`,
+      });
+      expect(first.code).toBe(exitCode === 0 ? 0 : 1);
+      expect(first.output.includes("CRABBOX_PHASE:openclaw-bootstrap-complete")).toBe(
+        exitCode === 0,
+      );
+      if (exitCode !== 0) {
+        expect(first.output).toContain("desktop setup failed with exit code 19");
+      }
+      const pid = fs.readFileSync(path.join(stateDir, "node.pid"), "utf8").trim();
+      await expectSetupPhases(enroll(home, nodeBootstrap, { enabled: true, setup }));
+      expect(fs.readFileSync(path.join(stateDir, "desktop-pids"), "utf8")).toBe(`${pid}\n${pid}\n`);
+      expect(fs.readFileSync(path.join(stateDir, "node.pid"), "utf8").trim()).toBe(pid);
+      expect(authorizations).toEqual([`Bearer ${nodeBootstrap.token}`]);
+    },
+    30_000,
+  );
+
   it.each([
     { enabled: true, runtimeDir: "/run/fixture" },
     { enabled: true, runtimeDir: "" },

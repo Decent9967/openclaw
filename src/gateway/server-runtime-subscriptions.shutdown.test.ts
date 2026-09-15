@@ -47,6 +47,7 @@ function createParams(signal: AbortSignal): Parameters<typeof startGatewayEventS
     chatAbortControllers: new Map(),
     restartRecoveryCandidates: new Map(),
     terminalSessions: { closeTaskSessions: vi.fn() },
+    refreshConnectedUserProfiles: vi.fn(),
   };
 }
 
@@ -99,7 +100,8 @@ it.each(["before startup", "before inherited connection drain"] as const)(
       }
       unsubs = startGatewayEventSubscriptions(createParams(connectionWork.signal));
       if (phase === "before startup") {
-        expect(unsubs.sessionActivitySummaries.ensure(target).state).toBe("stale");
+        expect(unsubs.sessionActivitySummaries.ensure(target).state).toBe("unavailable");
+        expect(prepared).not.toHaveBeenCalled();
         expect(complete).not.toHaveBeenCalled();
         return;
       }

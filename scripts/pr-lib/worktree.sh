@@ -223,7 +223,8 @@ fetch_canonical_ref() {
   git_dir=$(git rev-parse --absolute-git-dir) || return 1
   # Resolve relative URLs at the canonical root; ignore worktree origin/refmaps.
   # Other PRs and ordinary fetches own shared refs and the root FETCH_HEAD.
-  git -C "$root" --git-dir="$git_dir" fetch --no-tags --refmap= "$@" "$source" "$refspec"
+  # Automatic maintenance can prune unrelated worktree metadata, even on fetch.
+  git -C "$root" --git-dir="$git_dir" fetch --no-auto-maintenance --no-tags --refmap= "$@" "$source" "$refspec"
 }
 
 fetch_canonical_main() {
@@ -538,8 +539,12 @@ gc_pr_worktrees() {
         if ! require_worktree_cleanup_evidence "$dir"; then
           echo "skipping $dir (merge evidence preserved)"
         elif [ "$dry_run" = "true" ]; then
-          echo "would remove $dir (PR #$pr state=$state)"
-          removed=$((removed + 1))
+          if remove_worktree_if_present "$dir" true; then
+            echo "would remove $dir (PR #$pr state=$state)"
+            removed=$((removed + 1))
+          else
+            echo "skipping $dir (cleanup incomplete)"
+          fi
         elif cleanup_pr_worktree "$dir"; then
           echo "removed $dir (PR #$pr state=$state)"
           removed=$((removed + 1))

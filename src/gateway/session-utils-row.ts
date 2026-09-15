@@ -64,13 +64,13 @@ import {
   projectGatewaySessionRunState,
   resolveGatewaySessionGoal,
 } from "./session-utils-display.js";
+import { resolveSessionSelectedModelRef } from "./session-utils-model-selection.js";
 import {
   resolveGatewaySessionThinkingProjectionInternal,
   resolveSessionDisplayModelIdentityRefCached,
 } from "./session-utils-model.js";
 import {
   buildSessionListRowMetadataContext,
-  resolveSessionSelectedModelRef,
   resolveTranscriptUsageFallback,
 } from "./session-utils-projection.js";
 import { parseGroupKey } from "./session-utils-store.js";
@@ -278,6 +278,7 @@ export function buildGatewaySessionRow(params: {
     sessionKey: acpSessionKey,
     entry,
     modelCatalog: thinkingModelCatalog,
+    modelCatalogRouteVariants: preparedCatalog?.routeVariants,
     rowContext,
     providerPolicySource: preparedCatalog?.pluginRegistry ?? (lightweight ? "active" : undefined),
   });
@@ -488,6 +489,7 @@ export function buildGatewaySessionRow(params: {
         ? "inherited"
         : resolveSessionModelOverrideSource(entry),
     modelSelectionLocked: entry?.modelSelectionLocked,
+    runtimeSelectionLocked: thinkingProjection.runtimeSelectionLocked,
     agentRuntime: projectWorkerPlacementAgentRuntime(thinkingProjection.agentRuntime),
     contextTokens,
     contextBudgetStatus: resolveProjectedSessionContextBudgetStatus({
