@@ -35,7 +35,10 @@ type FeishuTraceState = {
   setupCount: number;
   loadedMedia: { buffer: Buffer; fileName: string; contentType: string } | null;
   omitNextMessageReceipt: boolean;
-  wireFaults: Array<{ fault: "rate-limit"; retryAfterMs: number }>;
+  wireFaults: Array<
+    | { fault: "rate-limit"; retryAfterMs: number }
+    | { fault: "write-error"; code: number; msg: string }
+  >;
 };
 
 const traceState = vi.hoisted((): FeishuTraceState => ({
@@ -311,11 +314,15 @@ function createRecordingCardKitFetch(): typeof fetch {
       if (wirePath.endsWith("/elements/content/content")) {
         const body = parseJsonRecord(init?.body);
         const fault = traceState.wireFaults.shift();
-        if (fault) {
+        if (fault?.fault === "rate-limit") {
           record(body, { status: 429, retryAfterMs: fault.retryAfterMs });
           return jsonResponse({ code: 99991400, msg: "rate limited" }, 429, {
             "retry-after": String(Math.ceil(fault.retryAfterMs / 1000)),
           });
+        }
+        if (fault?.fault === "write-error") {
+          record(body, { code: fault.code, msg: fault.msg });
+          return jsonResponse({ code: fault.code, msg: fault.msg });
         }
         record(body, { code: 0 });
         return jsonResponse({ code: 0, msg: "ok" });
@@ -415,11 +422,21 @@ function setupFeishuTrace(recorder: WireRecorder, scenario: DeliveryTraceScenari
         options.onCleanup?.();
         break;
       case "wire-fault":
-        if (step.fault !== "rate-limit") {
-          throw new Error("feishu trace scenarios script only rate-limit wire faults");
+        if (step.fault === "rate-limit") {
+          traceState.wireFaults.push({ fault: step.fault, retryAfterMs: step.retryAfterMs });
+          break;
         }
-        traceState.wireFaults.push({ fault: step.fault, retryAfterMs: step.retryAfterMs });
-        break;
+        if (step.fault === "write-error" && step.errorName === "sequence-rejected") {
+          traceState.wireFaults.push({
+            fault: "write-error",
+            code: 19_001,
+            msg: "sequence rejected",
+          });
+          break;
+        }
+        throw new Error(
+          `feishu trace scenarios script does not support wire fault: ${step.fault}/${"errorName" in step ? step.errorName : "?"}`,
+        );
     }
   };
 }
@@ -431,6 +448,28 @@ const FEISHU_TRACE_SCENARIOS: readonly DeliveryTraceScenarioName[] = [
   "rate-limit-during-preview",
   "overflow-pagination",
 ];
+
+// Local scenario (not in the shared contract set): a CardKit content update is
+// rejected mid-stream (sequence conflict), the session keeps the rejected
+// snapshot pending, and the next publication retries the write instead of
+// dropping it — the wire-level record of the acceptance-recovery contract.
+const recoveredContentRejectionScenario = {
+  name: "recovered-content-rejection",
+  steps: [
+    { kind: "reply-start" },
+    { kind: "tool-progress", name: "web_search", phase: "start" },
+    { kind: "advance", ms: 300 },
+    { kind: "partial", text: "Collecting traces" },
+    { kind: "advance", ms: 300 },
+    { kind: "wire-fault", fault: "write-error", errorName: "sequence-rejected" },
+    { kind: "partial", text: "Collecting traces from the gateway." },
+    { kind: "advance", ms: 400 },
+    { kind: "partial", text: "Collecting traces from the gateway. Found the failure." },
+    { kind: "advance", ms: 300 },
+    { kind: "final", text: "Collecting traces from the gateway. Found the failure." },
+    { kind: "idle" },
+  ],
+} as const;
 
 describe("feishu delivery trace goldens", () => {
   it("updates the accepted card without a duplicate send when its message receipt is absent", async () => {
@@ -598,4 +637,15 @@ describe("feishu delivery trace goldens", () => {
       });
     });
   }
+
+  it("records recovered-content-rejection", async () => {
+    const events = await runDeliveryTraceScenario({
+      scenario: recoveredContentRejectionScenario,
+      setup: (recorder) => setupFeishuTrace(recorder, "streaming-happy"),
+    });
+    expectDeliveryTraceMatchesGolden({
+      goldenUrl: new URL("./__traces__/recovered-content-rejection.trace.jsonl", import.meta.url),
+      events,
+    });
+  });
 });
