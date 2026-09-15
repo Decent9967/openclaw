@@ -352,7 +352,10 @@ function createRecordingCardKitFetch(): typeof fetch {
   ) as typeof fetch;
 }
 
-function makeTraceAccount(scenario: DeliveryTraceScenarioName): ResolvedFeishuAccount {
+function makeTraceAccount(
+  scenario: DeliveryTraceScenarioName | (typeof LOCAL_TRACE_ACCOUNTS)[number],
+  channelOverrides?: Record<string, unknown>,
+): ResolvedFeishuAccount {
   traceState.setupCount += 1;
   return {
     accountId: "main",
@@ -364,24 +367,37 @@ function makeTraceAccount(scenario: DeliveryTraceScenarioName): ResolvedFeishuAc
     appId: `app-${scenario}-${traceState.setupCount}`,
     appSecret: "test-secret",
     domain: "feishu",
-    // Nested streaming.mode "partial" matches the retired `streaming: true`
-    // boolean, so the recorded wire goldens stay byte-identical.
-    config: FeishuConfigSchema.parse({ renderMode: "auto", streaming: { mode: "partial" } }),
+    config: FeishuConfigSchema.parse(
+      channelOverrides ?? {
+        renderMode: "auto",
+        streaming: { mode: "partial" },
+      },
+    ),
   };
 }
 
-function setupFeishuTrace(recorder: WireRecorder, scenario: DeliveryTraceScenarioName) {
+function setupFeishuTrace(
+  recorder: WireRecorder,
+  scenario: DeliveryTraceScenarioName,
+  overrides?: {
+    scenarioName?: string;
+    channel?: Record<string, unknown>;
+    agentBlockDefault?: "on" | "off";
+  },
+) {
   traceState.recordWireCall = recorder.recordWireCall;
   traceState.messageCount = 0;
   traceState.reactionCount = 0;
   traceState.cardCount = 0;
   traceState.wireFaults = [];
-  traceState.account = makeTraceAccount(scenario);
+  traceState.account = makeTraceAccount(scenario, overrides?.channel);
   traceState.larkClient = createRecordingLarkClient();
   traceState.cardKitFetch = createRecordingCardKitFetch();
 
   const created = createFeishuReplyDispatcher({
-    cfg: {} as never,
+    cfg: (overrides?.agentBlockDefault
+      ? { agents: { defaults: { blockStreamingDefault: overrides.agentBlockDefault } } }
+      : {}) as never,
     agentId: "agent",
     runtime: { log: () => {}, error: () => {} } as never,
     chatId: "oc-trace-chat",
@@ -469,6 +485,49 @@ const recoveredContentRejectionScenario = {
     { kind: "final", text: "Collecting traces from the gateway. Found the failure." },
     { kind: "idle" },
   ],
+} as const;
+
+// Local block-inheritance matrix (channel unset vs explicit vs legacy flat
+// key against an agent-level blockStreamingDefault): preview is off so the
+// wire outcome of each block boundary is exactly the inherited policy.
+const LOCAL_TRACE_ACCOUNTS = [
+  "block-inherited-on",
+  "block-explicit-off",
+  "block-explicit-on",
+] as const;
+
+const blockGuidePartOne = "Part one of the install guide: prerequisites and download.";
+const blockGuidePartTwo = "Part two of the install guide: run the installer and verify.";
+
+function blockInheritanceSteps(): readonly DeliveryTraceInStep[] {
+  return [
+    { kind: "reply-start" },
+    { kind: "partial", text: blockGuidePartOne },
+    { kind: "advance", ms: 300 },
+    { kind: "block-final", text: blockGuidePartOne },
+    { kind: "advance", ms: 300 },
+    { kind: "partial", text: blockGuidePartTwo },
+    { kind: "advance", ms: 300 },
+    { kind: "block-final", text: blockGuidePartTwo },
+    { kind: "advance", ms: 300 },
+    { kind: "final", text: `${blockGuidePartOne}\n\n${blockGuidePartTwo}` },
+    { kind: "idle" },
+  ];
+}
+
+const blockInheritanceScenarios = {
+  "block-inherited-on": {
+    channel: { renderMode: "auto", streaming: { mode: "off" } },
+    agentBlockDefault: "on" as const,
+  },
+  "block-explicit-off": {
+    channel: { renderMode: "auto", streaming: { mode: "off", block: { enabled: false } } },
+    agentBlockDefault: "on" as const,
+  },
+  "block-explicit-on": {
+    channel: { renderMode: "auto", streaming: { mode: "off", block: { enabled: true } } },
+    agentBlockDefault: "off" as const,
+  },
 } as const;
 
 describe("feishu delivery trace goldens", () => {
@@ -648,4 +707,22 @@ describe("feishu delivery trace goldens", () => {
       events,
     });
   });
+
+  for (const scenarioName of LOCAL_TRACE_ACCOUNTS) {
+    it(`records ${scenarioName}`, async () => {
+      const preset = blockInheritanceScenarios[scenarioName];
+      const events = await runDeliveryTraceScenario({
+        scenario: { name: scenarioName, steps: blockInheritanceSteps() },
+        setup: (recorder) =>
+          setupFeishuTrace(recorder, "final-only", {
+            channel: preset.channel,
+            agentBlockDefault: preset.agentBlockDefault,
+          }),
+      });
+      expectDeliveryTraceMatchesGolden({
+        goldenUrl: new URL(`./__traces__/${scenarioName}.trace.jsonl`, import.meta.url),
+        events,
+      });
+    });
+  }
 });
