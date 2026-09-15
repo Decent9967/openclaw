@@ -25,11 +25,7 @@ import {
 } from "./streaming-card-wire.js";
 
 export { mergeStreamingText } from "./streaming-card-wire.js";
-export type {
-  Credentials as FeishuStreamingCredentials,
-  FeishuStreamingDeps,
-  FeishuStreamingFetch,
-} from "./streaming-card-wire.js";
+export type { FeishuStreamingDeps, FeishuStreamingFetch } from "./streaming-card-wire.js";
 
 type CardState = {
   cardId: string;
