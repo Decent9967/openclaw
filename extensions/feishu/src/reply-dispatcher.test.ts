@@ -1553,6 +1553,42 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     expect(result.replyOptions).toHaveProperty("disableBlockStreaming", true);
   });
 
+  it("suppresses core default progress messages when preview and blocks are both off", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "auto",
+        streaming: { mode: "off", block: { enabled: false } },
+      },
+    });
+
+    const { result } = createDispatcherHarness();
+    expect(result.replyOptions).toHaveProperty("disableBlockStreaming", true);
+    expect(result.replyOptions).toHaveProperty("suppressDefaultToolProgressMessages", true);
+  });
+
+  it("keeps core default progress messages while inherited blocks carry them", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "auto",
+        streaming: { mode: "off" },
+      },
+    });
+
+    const { result } = createDispatcherHarness({
+      cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
+    });
+    expect(result.replyOptions).toHaveProperty("disableBlockStreaming", false);
+    expect(result.replyOptions).toHaveProperty("suppressDefaultToolProgressMessages", false);
+  });
+
   it("enables core block streaming when Feishu blockStreaming is explicitly true", async () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
