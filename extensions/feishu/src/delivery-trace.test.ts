@@ -10,6 +10,7 @@ import {
   expectDeliveryTraceMatchesGolden,
   runDeliveryTraceScenario,
   type DeliveryTraceInStep,
+  type DeliveryTraceStep,
   type DeliveryTraceScenarioName,
   type WireRecorder,
 } from "openclaw/plugin-sdk/channel-contract-testing";
@@ -499,7 +500,7 @@ const LOCAL_TRACE_ACCOUNTS = [
 const blockGuidePartOne = "Part one of the install guide: prerequisites and download.";
 const blockGuidePartTwo = "Part two of the install guide: run the installer and verify.";
 
-function blockInheritanceSteps(): readonly DeliveryTraceInStep[] {
+function blockInheritanceSteps(): readonly DeliveryTraceStep[] {
   return [
     { kind: "reply-start" },
     { kind: "partial", text: blockGuidePartOne },
