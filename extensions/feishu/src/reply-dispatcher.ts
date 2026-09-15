@@ -1724,8 +1724,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       // mid-turn progress, so core defaults must be suppressed here too —
       // otherwise an explicit channel block-off keeps emitting mid-turn
       // progress messages when no preview card can render.
-      suppressDefaultToolProgressMessages:
-        previewStreamingEnabled || !blockStreamingEnabled,
+      suppressDefaultToolProgressMessages: previewStreamingEnabled || !blockStreamingEnabled,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {
