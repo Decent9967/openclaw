@@ -7,7 +7,10 @@ import {
 } from "../../test/vitest/vitest.agents-paths.mjs";
 import { cliProcessTestFiles } from "../../test/vitest/vitest.cli-process-paths.mjs";
 import { commandsLightTestFiles } from "../../test/vitest/vitest.commands-light-paths.mjs";
-import { databaseWorkerCoreTestFiles } from "../../test/vitest/vitest.database-worker-core-paths.mjs";
+import {
+  databaseWorkerCoreTestFiles,
+  isDatabaseWorkerCoreTestFile,
+} from "../../test/vitest/vitest.database-worker-core-paths.mjs";
 import {
   gatewayDatabaseWorkerTestFiles,
   gatewayPluginTestFiles,
@@ -169,6 +172,15 @@ const policyTestWatches = [
     // Reads the bundled Anthropic manifest to pin the manifest-free alias table.
     testFile: "src/agents/model-ref-shared.test.ts",
     watchGlobs: ["extensions/anthropic/openclaw.plugin.json"],
+  },
+  {
+    testFile: "src/gateway/gateway-ssh-upload-signal.test.ts",
+    watchGlobs: [
+      "src/agents/sandbox/remote-shell-transport.ts",
+      "src/agents/sandbox/remote-shell-backend.ts",
+      "src/agents/sandbox/ssh.ts",
+      "src/agents/sandbox/ssh-backend.ts",
+    ],
   },
 ] satisfies readonly PolicyTestWatch[];
 
@@ -370,7 +382,6 @@ const COMPACT_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["agentic-control-plane-runtime", 19],
   ["agentic-control-plane-runtime-config", 20],
   ["agentic-control-plane-runtime-cron", 22],
-  ["agentic-control-plane-runtime-network", 1],
   ["agentic-control-plane-runtime-server", 23],
   ["agentic-control-plane-runtime-shared-token", 9],
   ["agentic-control-plane-runtime-state", 33],
@@ -571,7 +582,6 @@ const COMPACT_GITHUB_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["agentic-control-plane-runtime", 31],
   ["agentic-control-plane-runtime-config", 31],
   ["agentic-control-plane-runtime-cron", 52],
-  ["agentic-control-plane-runtime-network", 2],
   ["agentic-control-plane-runtime-server", 54],
   ["agentic-control-plane-runtime-shared-token", 28],
   ["agentic-control-plane-runtime-state", 55],
@@ -1333,9 +1343,6 @@ function resolveGatewayServerShardName(file: string): string {
   if (name.includes("cron")) {
     return "agentic-control-plane-runtime-cron";
   }
-  if (name.includes("network")) {
-    return "agentic-control-plane-runtime-network";
-  }
   if (
     name.includes("plugin") ||
     name.includes("hooks") ||
@@ -1380,7 +1387,6 @@ function createGatewayServerSplitShards(): NodeTestSplitShard[] {
     "agentic-control-plane-runtime",
     "agentic-control-plane-runtime-config",
     "agentic-control-plane-runtime-cron",
-    "agentic-control-plane-runtime-network",
     "agentic-control-plane-runtime-server",
     "agentic-control-plane-runtime-shared-token",
     "agentic-control-plane-runtime-state",
@@ -1634,6 +1640,9 @@ function resolveInfraShardName(file: string): string {
 function createInfraSplitShards(): NodeTestSplitShard[] {
   const groups = new Map<string, string[]>();
   for (const file of listTestFiles("src/infra")) {
+    if (isDatabaseWorkerCoreTestFile(file)) {
+      continue;
+    }
     const shardName = resolveInfraShardName(file);
     groups.set(shardName, [...(groups.get(shardName) ?? []), file]);
   }
@@ -2903,6 +2912,11 @@ export function createSelectedNodeTestShardBundles(
       ? createCompactNodeTestShardBundles(shards, options, "pull-request")
       : [];
   const canonicalGroups = full.flatMap((shard) => shard.groups);
+  const isWholeToolingPair = (group: NodeTestShardGroup) =>
+    group.shard_name === "core-tooling-isolated" &&
+    group.configs.length === 2 &&
+    group.configs[0] === "test/vitest/vitest.tooling-docker.config.ts" &&
+    group.configs[1] === TOOLING_ISOLATED_CONFIG;
   const selectedGroups = new Map<NodeTestShardGroup, string[]>();
   for (const target of selected) {
     if (tooling.has(target)) {
@@ -2911,8 +2925,8 @@ export function createSelectedNodeTestShardBundles(
     const matches = canonicalGroups.filter(
       (group) =>
         !group.requiresDist &&
-        group.configs.length === 1 &&
-        group.configs[0] === configs.get(target) &&
+        ((group.configs.length === 1 && group.configs[0] === configs.get(target)) ||
+          (isWholeToolingPair(group) && group.configs.includes(configs.get(target)!))) &&
         group.env?.OPENCLAW_NODE_TEST_VITEST_ARGS_JSON === undefined &&
         (!group.includePatterns || group.includePatterns.includes(target)),
     );
@@ -2936,6 +2950,10 @@ export function createSelectedNodeTestShardBundles(
         const files = selectedGroups.get(group);
         if (!files?.length) {
           return [];
+        }
+        // The paired configs share one canonical isolation and timing owner.
+        if (isWholeToolingPair(group)) {
+          return [group];
         }
         const includePatterns =
           group.includePatterns?.filter((file) => files.includes(file)) ?? files;

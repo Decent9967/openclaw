@@ -678,6 +678,10 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["computer.invoke", "computer", "operator.write", "2026.9"],
   ["sessions.activitySummary.ensure", "session-activity-summary", "operator.write", "2026.9"],
   ["controlUi.sessionPullRequests.checks", "control-ui", "operator.read", "2026.9"],
+  ["diagnostics.cpuProfile", "diagnostics", "operator.admin", "2026.9"],
+  ["talk.voice.get", "talk", "operator.talk", "2026.9"],
+  ["talk.voice.set", "talk", "operator.talk", "2026.9"],
+  ["talk.voice.complete", "talk", "operator.talk", "2026.9"],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];
 
 export type CoreGatewayHandlerFamily = Exclude<(typeof CORE_GATEWAY_METHOD_SPECS)[number][1], null>;
@@ -721,24 +725,18 @@ export function listCoreGatewayHandlerMethodNames(): ReadonlyMap<
 > {
   const methodsByFamily = new Map<CoreGatewayHandlerFamily, string[]>();
   for (const [name, family] of CORE_GATEWAY_METHOD_SPECS) {
-    if (!family) {
-      continue;
+    if (family) {
+      const methods = methodsByFamily.get(family) ?? [];
+      methods.push(name);
+      methodsByFamily.set(family, methods);
     }
-    const methods = methodsByFamily.get(family) ?? [];
-    methods.push(name);
-    methodsByFamily.set(family, methods);
   }
   return methodsByFamily;
 }
 
-/** Looks up the raw core method scope, including node and dynamic sentinel scopes. */
-function resolveCoreGatewayMethodScope(method: string): GatewayMethodScope | undefined {
-  return CORE_GATEWAY_METHOD_SPEC_BY_NAME.get(method)?.scope;
-}
-
 /** Looks up an operator-only core method scope, excluding node and dynamic methods. */
 export function resolveCoreOperatorGatewayMethodScope(method: string): OperatorScope | undefined {
-  const scope = resolveCoreGatewayMethodScope(method);
+  const scope = CORE_GATEWAY_METHOD_SPEC_BY_NAME.get(method)?.scope;
   return scope === NODE_GATEWAY_METHOD_SCOPE || scope === DYNAMIC_GATEWAY_METHOD_SCOPE
     ? undefined
     : scope;
@@ -746,12 +744,12 @@ export function resolveCoreOperatorGatewayMethodScope(method: string): OperatorS
 
 /** Returns true for core methods reserved for authenticated node clients. */
 export function isCoreNodeGatewayMethod(method: string): boolean {
-  return resolveCoreGatewayMethodScope(method) === NODE_GATEWAY_METHOD_SCOPE;
+  return CORE_GATEWAY_METHOD_SPEC_BY_NAME.get(method)?.scope === NODE_GATEWAY_METHOD_SCOPE;
 }
 
 /** Returns true for core methods whose required operator scope is resolved by the handler. */
 export function isDynamicOperatorGatewayMethod(method: string): boolean {
-  return resolveCoreGatewayMethodScope(method) === DYNAMIC_GATEWAY_METHOD_SCOPE;
+  return CORE_GATEWAY_METHOD_SPEC_BY_NAME.get(method)?.scope === DYNAMIC_GATEWAY_METHOD_SCOPE;
 }
 
 /** Returns true when a method name has an explicit core policy entry. */

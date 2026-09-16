@@ -1,3 +1,5 @@
+import type { NativeHookRelayStoreWorkerOperations } from "../agents/harness/native-hook-relay-store.worker-contract.js";
+import type { SubagentRunReadRecord } from "../agents/subagents/registry/subagent-registry-read.types.js";
 import type { ClawInstallSchemaVersionRow } from "../claws/provenance-runtime-read.kernel.js";
 import type { ConfigHealthPatch } from "../config/io.health-state.kernel.js";
 import type {
@@ -5,12 +7,17 @@ import type {
   ConfigHealthEntryBasis,
 } from "../config/io.health-state.types.js";
 import type { CronStoreWorkerOperations } from "../cron/store/load-worker.types.js";
+import type { CronStoreSaveWorkerOperations } from "../cron/store/save-worker.types.js";
+import type { DeferredPluginMigration } from "../infra/deferred-plugin-migrations.js";
+import type { DeliveryQueueWorkerOperations } from "../infra/delivery-queue.worker-contract.js";
 import type { SessionDeliveryWorkerOperations } from "../infra/session-delivery-queue.worker-contract.js";
 import type { PreparedSqliteAuditRecord } from "../infra/sqlite-audit-record.kernel.js";
 import type { SqliteFileGeneration } from "../infra/sqlite-file-generation.js";
+import type { readRemoteModelCatalog } from "../model-catalog/remote-store.js";
 import type { PluginStateWorkerOperations } from "../plugin-state/plugin-state-worker-contract.js";
 import type { PluginMetadataStateSelector } from "../plugins/installed-plugin-index-row.js";
 import type { TaskFlowView } from "../plugins/runtime/task-domain-types.js";
+import type { ProjectRegistryIdentity } from "../projects/project-registry.kernel.js";
 import type { ManagedTaskInFlowInput } from "../tasks/task-flow-managed-run-task.kernel.js";
 import type { RunTaskInFlowResult } from "../tasks/task-flow-managed-run-task.types.js";
 import type {
@@ -25,6 +32,7 @@ import type {
 } from "../tasks/task-registry.store.types.js";
 import type { TaskRecord, TaskRegistrySummary } from "../tasks/task-registry.types.js";
 import type { PreparedBackupRunRecord } from "./backup-run-records.kernel.js";
+import type { OpenClawStateLeaseIdentity } from "./openclaw-state-lease-store.js";
 import type { UserPreferenceWorkerOperations } from "./user-preferences.types.js";
 
 type TaskLookupRecords = {
@@ -45,15 +53,34 @@ type TaskFlowReadQuery = {
 };
 
 /** Commands share one physical shared-state actor; bindings belong to commands, not open input. */
-export type OpenClawStateWorkerOperations = PluginStateWorkerOperations &
+export type OpenClawStateWorkerOperations = NativeHookRelayStoreWorkerOperations &
+  PluginStateWorkerOperations &
   UserPreferenceWorkerOperations &
   CronStoreWorkerOperations &
-  SessionDeliveryWorkerOperations & {
+  CronStoreSaveWorkerOperations &
+  SessionDeliveryWorkerOperations &
+  DeliveryQueueWorkerOperations & {
+    "subagents.sessionList": {
+      input: undefined;
+      output: Map<string, SubagentRunReadRecord> | undefined;
+    };
     "backup.recordOutcome": { input: PreparedBackupRunRecord; output: void };
     "projects.findRoot": { input: { repoRoot: string }; output: string | undefined };
+    "projects.remove": {
+      input: { project: ProjectRegistryIdentity; lease: OpenClawStateLeaseIdentity };
+      output: boolean;
+    };
+    "modelCatalog.remote.read": {
+      input: { artifactPreservingReadOnly: boolean };
+      output: ReturnType<typeof readRemoteModelCatalog>;
+    };
     "plugins.metadata.read": {
       input: { selector: PluginMetadataStateSelector; artifactPreservingReadOnly?: boolean };
       output: { value_json: string } | undefined;
+    };
+    "plugins.deferredMigrations.read": {
+      input: undefined;
+      output: readonly DeferredPluginMigration[];
     };
     "claws.install-schema-versions": {
       input: undefined;

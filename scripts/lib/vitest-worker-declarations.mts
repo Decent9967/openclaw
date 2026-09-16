@@ -10,6 +10,8 @@ export const runtimeProcessDeclarationEntries = {
 };
 export const vitestWorkerDeclarationEntries = {
   ...runtimeProcessDeclarationEntries,
+  "cli/update-cli/update-command-legacy-finalize-entrypoint.test-support":
+    "src/cli/update-cli/update-command-legacy-finalize-entrypoint.test-support.ts",
   "extensions/logbook/sqlite-backend-entrypoint.test-support":
     "extensions/logbook/src/sqlite-backend-entrypoint.test-support.ts",
   "extensions/team-reports/sqlite-backend-entrypoint.test-support":
@@ -48,5 +50,7 @@ export const vitestWorkerDeclarationEntries = {
     "src/skills/library/persistence-runtime.test-support.ts",
   "state/openclaw-state-lease-runtime.test-support":
     "src/state/openclaw-state-lease-runtime.test-support.ts",
+  "state/openclaw-agent-db-module-identity-runtime.test-support":
+    "src/state/openclaw-agent-db-module-identity-runtime.test-support.ts",
   "tui/tui-pty-runtime-test-support": "src/tui/tui-pty-runtime-test-support.ts",
 };

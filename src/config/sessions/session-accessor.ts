@@ -171,6 +171,7 @@ export {
   resolveSessionEntrySelection,
   updateResolvedSessionEntry,
   upsertSessionEntryCore,
+  withSessionEntryReadOnlyScope,
 } from "./session-accessor.entry.js";
 export {
   readSessionIdentityEvidenceBatch,
@@ -250,6 +251,7 @@ export {
   appendTranscriptMessage,
   appendTranscriptMessageSync,
   findTranscriptEvent,
+  hasSessionTranscriptEventsSync,
   hasSessionTranscriptMessage,
   inspectTranscriptEventsSync,
   loadTranscriptEventRowsAfterSeqSync,
@@ -267,6 +269,7 @@ export {
   readTranscriptIdentityByEventId,
   readTranscriptRawDelta,
   readTranscriptMutationAtSync,
+  readTranscriptMutationStateSync,
   readTranscriptExportSnapshotReadOnlySync,
   readTranscriptStatsBatchReadOnlySync,
   readTranscriptStatsSync,

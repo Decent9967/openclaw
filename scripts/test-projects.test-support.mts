@@ -240,10 +240,6 @@ const EXTENSION_ACTIVE_MEMORY_VITEST_CONFIG =
 const EXTENSION_ACPX_VITEST_CONFIG = "test/vitest/vitest.extension-acpx.config.ts";
 const EXTENSION_BROWSER_VITEST_CONFIG = "test/vitest/vitest.extension-browser.config.ts";
 const EXTENSION_CODEX_VITEST_CONFIG = "test/vitest/vitest.extension-codex.config.ts";
-const EXTENSION_CODEX_APP_SERVER_ATTEMPT_VITEST_CONFIG =
-  "test/vitest/vitest.extension-codex-app-server-attempt.config.ts";
-const EXTENSION_CODEX_APP_SERVER_ATTEMPT_EXTRA_VITEST_CONFIG =
-  "test/vitest/vitest.extension-codex-app-server-attempt-extra.config.ts";
 const EXTENSION_CODEX_APP_SERVER_ATTEMPT_LIGHT_VITEST_CONFIG =
   "test/vitest/vitest.extension-codex-app-server-attempt-light.config.ts";
 const EXTENSION_CODEX_APP_SERVER_ATTEMPT_SUPPORT_VITEST_CONFIG =
@@ -330,8 +326,6 @@ const FULL_SUITE_CONFIG_WEIGHT = new Map([
   [AGENTS_SUPPORT_VITEST_CONFIG, 168],
   [AGENTS_TOOLS_VITEST_CONFIG, 167],
   [EXTENSION_CODEX_VITEST_CONFIG, 168],
-  [EXTENSION_CODEX_APP_SERVER_ATTEMPT_VITEST_CONFIG, 168],
-  [EXTENSION_CODEX_APP_SERVER_ATTEMPT_EXTRA_VITEST_CONFIG, 118],
   [EXTENSION_CODEX_APP_SERVER_ATTEMPT_LIGHT_VITEST_CONFIG, 82],
   [EXTENSION_CODEX_APP_SERVER_ATTEMPT_SUPPORT_VITEST_CONFIG, 80],
   [EXTENSION_CODEX_APP_SERVER_RUNTIME_VITEST_CONFIG, 88],
@@ -2703,7 +2697,10 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
   ],
   [/^scripts\/run-node\.(?:mjs|mts)$/u, [runNode]],
   [/^scripts\/ios-write-swift-filelist\.m[jt]s$/u, ["ios-run"]],
-  [/^scripts\/pr-lib\/merge(?:-outcome)?\.sh$/u, ["pr-merge", "pr-merge-outcome"]],
+  [
+    /^scripts\/pr-lib\/(?:merge(?:-outcome)?\.sh|merge-legacy-refusal\.mjs)$/u,
+    ["pr-merge", "pr-merge-outcome"],
+  ],
   [/^scripts\/plugin-clawhub-publish\.sh$/u, ["test/plugin-clawhub-release.test.ts"]],
   [/^scripts\/openclaw-npm-postpublish-verify\.ts$/u, [npmPostpublish]],
   [
@@ -3381,6 +3378,9 @@ function resolveToolingTestTargets(changedPath: string, cwd = process.cwd()) {
       ? resolveDirectToolingReferenceTests(implementationPath, cwd)
       : [];
   const targets = [
+    ...(!hasDirectOwner && isRoutableChangedTarget(changedPath) && isTestFileTarget(changedPath)
+      ? [changedPath]
+      : []),
     ...exactTargets,
     ...(explicitTargets ?? []),
     ...semanticTargets,
@@ -4212,9 +4212,10 @@ export function buildVitestRunPlans(
     }
     groupedTargets.set("uiIsolated", current);
   }
-  const cliTargets = groupedTargets.get("cli") ?? [];
+  // Source-child ownership can cross shared suites (for example state tests).
+  // Match every active target so broad selections cannot silently omit excluded children.
   const impliedCliProcessTargets = cliProcessTestFiles.filter((file) =>
-    cliTargets.some((targetArg) =>
+    activeTargetArgs.some((targetArg) =>
       includePatternMatchesAnyFile(toScopedIncludePattern(targetArg, cwd), [file]),
     ),
   );

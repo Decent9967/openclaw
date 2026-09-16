@@ -12,8 +12,8 @@ import { isPathInside } from "../../infra/path-guards.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { createCommandError } from "../../process/command-error.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
-import { withOpenClawStateLease } from "../../state/openclaw-state-lease.js";
 import { createCrustaceanSlug } from "../session-slug.js";
+import { withWorktreeAllocationLease } from "./allocation.js";
 import { resolveWorktreeBase } from "./base-ref.js";
 import {
   directorySizeBytes,
@@ -22,6 +22,7 @@ import {
   requireWorktreeDiskSpace,
   WORKTREE_SETUP_HEADROOM_BYTES,
 } from "./capacity.js";
+import { resolveWorktreeSourceProfile } from "./checkout-profiles.js";
 import {
   addManagedWorktree,
   collectWorktreeTemplates,
@@ -33,7 +34,12 @@ import {
   resolveEmptyWorktreeSourceRoot,
 } from "./empty-source.js";
 import { WorktreeRepositoryError } from "./errors.js";
-import { lockState, lockWorktreeForProcess, unlockWorktree } from "./git-lock.js";
+import {
+  createWorktreeLockPrefilter,
+  lockState,
+  lockWorktreeForProcess,
+  unlockWorktree,
+} from "./git-lock.js";
 import {
   commandError,
   listGitWorktrees,
@@ -64,6 +70,7 @@ import {
   updateRegistryWorktree,
   WorktreeRemovalContentionError,
 } from "./registry.js";
+import { prepareSnapshotBranchDeletion, requireManagedWorktreeHead } from "./removal-git.js";
 import { resolveCheckoutRootFromRealPath } from "./repository-paths.js";
 import {
   abortWorktreeRemoval,
@@ -71,7 +78,7 @@ import {
   finalizeWorktreeRemoval,
   hasLiveWorktreeRunLease,
 } from "./run-lease.js";
-import { listTemplates } from "./template-registry.js";
+import { hasTemplates } from "./template-registry.js";
 import type {
   CreateManagedWorktreeParams,
   ManagedWorktreeBranchesResult,
@@ -88,9 +95,6 @@ export const SNAPSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // Snapshot refs 
 export const WORKTREE_GC_INTERVAL_MS = 60 * 60 * 1000;
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const WORKTREE_CREATE_LEASE_SCOPE = "core:managed-worktrees:create";
-const WORKTREE_CREATE_LEASE_MS = 60_000;
-const WORKTREE_CREATE_LEASE_WAIT_MS = 10 * 60_000;
 
 /** Removal aborted because snapshot loss was not permitted. */
 export class WorktreeSnapshotError extends Error {
@@ -155,6 +159,8 @@ type RemoveWorktreeParams = WorktreeMutationGuard & {
   id: string;
   reason: string;
   allowSnapshotLoss?: boolean;
+  requireLossless?: boolean;
+  inspectedHead?: string;
   claimToken?: string;
   runEndCleanup?: ManagedWorktreeRunEndCleanup;
 };
@@ -299,7 +305,6 @@ async function shouldPreserveOrphanCandidate(
 async function cleanupFailedCreate(repoRoot: string, worktreePath: string, branch: string) {
   const removed = await runGit(repoRoot, ["worktree", "remove", "--force", worktreePath]);
   const deletedBranch = await runGit(repoRoot, ["branch", "-D", branch]);
-  await runGit(repoRoot, ["worktree", "prune"]);
   if (removed.code !== 0 || deletedBranch.code !== 0) {
     const failure =
       removed.code !== 0
@@ -335,7 +340,6 @@ async function resetFailedWorktreeAdd(
   if (branchExists.code === 0) {
     await requireGit(repoRoot, ["branch", "-D", branch]);
   }
-  await requireGit(repoRoot, ["worktree", "prune"]);
 }
 
 async function canResetFailedWorktreeAdd(
@@ -428,7 +432,10 @@ export class ManagedWorktreeService {
   }
 
   async createEmpty(
-    params: Omit<CreateManagedWorktreeParams, "repoRoot" | "baseRef" | "checkoutCommit"> & {
+    params: Omit<
+      CreateManagedWorktreeParams,
+      "repoRoot" | "baseRef" | "checkoutCommit" | "profiles"
+    > & {
       ownerKind: "session";
       ownerId: string;
     },
@@ -485,6 +492,9 @@ export class ManagedWorktreeService {
         params.ownerKind ?? "manual",
         params.ownerId,
       );
+      if (existing && params.profiles?.length) {
+        throw new Error("Source profiles require a new worktree; use a new owner and name.");
+      }
       if (existing && (await worktreePathExists(existing.path))) {
         const validated = await this.rebindLiveRepository(existing, params);
         if (validated.repoRoot !== repository.repoRoot) {
@@ -511,28 +521,7 @@ export class ManagedWorktreeService {
     params: WorktreeMutationGuard,
     run: (guard: WorktreeMutationGuard) => Promise<T>,
   ): Promise<T> {
-    // Disk headroom is shared across repositories. Hold one renewable lease
-    // through checkout, setup, snapshots, and publication, including CLI processes.
-    return await withOpenClawStateLease(
-      {
-        scope: WORKTREE_CREATE_LEASE_SCOPE,
-        key: "capacity",
-        database: { scope: "shared", options: { env: this.env } },
-        leaseMs: WORKTREE_CREATE_LEASE_MS,
-        waitMs: WORKTREE_CREATE_LEASE_WAIT_MS,
-        leaseLabel: "managed worktree allocation lease",
-        operationLabel: "agents.worktrees.allocation",
-        signal: params.signal,
-      },
-      async (lease) =>
-        await run({
-          signal: lease.signal,
-          commitGuard: () => {
-            lease.assertOwned();
-            params.commitGuard?.();
-          },
-        }),
-    );
+    return await withWorktreeAllocationLease({ ...params, env: this.env }, run);
   }
 
   private requireAllocationSpace(target: string, repository: ResolvedRepository, bytes = 0) {
@@ -560,6 +549,9 @@ export class ManagedWorktreeService {
     const existing = suppliedName
       ? findWorktreeByName(this.env, repository.fingerprint, suppliedName)
       : undefined;
+    if (existing && params.profiles?.length) {
+      throw new Error("Source profiles require a new worktree; choose an unused --name.");
+    }
     // Name reuse only ever adopts the caller's own record. Without this guard a
     // caller-chosen name could bind a new owner to another session's or a
     // manual checkout and run inside it.
@@ -621,6 +613,7 @@ export class ManagedWorktreeService {
     }
     const base = params.checkoutCommit
       ? {
+          commit: params.checkoutCommit,
           gitOperand: params.checkoutCommit,
           recordRef: params.baseRef ?? params.checkoutCommit,
           remote: false,
@@ -631,7 +624,7 @@ export class ManagedWorktreeService {
           params.signal,
           params.commitGuard,
         );
-    const gitBytes = Math.max(
+    let gitBytes = Math.max(
       await estimateWorktreeGitBytes(repository.repoRoot, base.gitOperand, {
         signal: params.signal,
         assertCurrent: params.commitGuard,
@@ -667,13 +660,32 @@ export class ManagedWorktreeService {
       : 0;
     params.signal?.throwIfAborted();
     params.commitGuard?.();
-    await fs.mkdir(root, { recursive: true });
-    params.signal?.throwIfAborted();
-    params.commitGuard?.();
-    let gitBase = base.gitOperand;
+    let gitBase = params.profiles?.length ? base.commit : base.gitOperand;
     let recordBase = base.recordRef;
-    const addCheckout = () =>
-      addManagedWorktree({
+    const addCheckout = async () => {
+      // Resolve on every attempt, including the remote-base fallback to local HEAD.
+      // Never pair one commit's source selection with another commit's checkout.
+      const sourceProfile = params.profiles?.length
+        ? await resolveWorktreeSourceProfile(repository.repoRoot, gitBase, params.profiles, {
+            signal: params.signal,
+            commitGuard: () => params.commitGuard?.(),
+          })
+        : undefined;
+      if (sourceProfile) {
+        // A fallback HEAD can advance after its first size inventory.
+        // Admission must cover the exact commit selected for this attempt.
+        gitBytes = Math.max(
+          gitBytes,
+          await estimateWorktreeGitBytes(repository.repoRoot, sourceProfile.commit, {
+            signal: params.signal,
+            assertCurrent: params.commitGuard,
+          }),
+        );
+      }
+      params.signal?.throwIfAborted();
+      params.commitGuard?.();
+      await fs.mkdir(root, { recursive: true });
+      return await addManagedWorktree({
         env: this.env,
         now: this.now,
         enabled: this.getConfig?.().worktreeAcceleration !== false,
@@ -681,8 +693,9 @@ export class ManagedWorktreeService {
         commonDir: repository.commonDir,
         worktreeRoot: path.dirname(root),
         destination: worktreePath,
-        branch,
-        base: gitBase,
+        branch: { mode: "create", name: branch },
+        base: sourceProfile?.commit ?? gitBase,
+        sourceProfile,
         requireSpace: (cloneBytes) =>
           this.requireAllocationSpace(
             worktreePath,
@@ -692,6 +705,7 @@ export class ManagedWorktreeService {
         signal: params.signal,
         commitGuard: () => params.commitGuard?.(),
       });
+    };
     let added = await addCheckout();
     if (added.code !== 0 && base.remote) {
       if (!(await canResetFailedWorktreeAdd(repository.repoRoot, worktreePath, branch, added))) {
@@ -882,6 +896,29 @@ export class ManagedWorktreeService {
     claimWorktreeRemoval(this.env, { worktreeId: record.id, token: claimToken });
     try {
       record = await this.rebindLiveRepository(record, params);
+      const gitOptions = {
+        signal: params.signal,
+        beforeRun: params.commitGuard,
+        killProcessTree: true,
+      };
+      const pendingRef = `refs/openclaw/removals/${record.id}`;
+      const pending = await runGit(
+        record.repoRoot,
+        ["show-ref", "--verify", "--quiet", pendingRef],
+        gitOptions,
+      );
+      if (pending.code !== 1) {
+        if (pending.code !== 0) {
+          throw commandError("git show-ref --verify", pending);
+        }
+        throw new Error(
+          `Previous worktree removal may be incomplete; inspect ${record.path} before cleanup. Recovery snapshot preserved at ${pendingRef}.`,
+        );
+      }
+      const head = await requireManagedWorktreeHead(record, gitOptions);
+      if (params.inspectedHead && params.inspectedHead !== head) {
+        throw new Error("Worktree HEAD changed after lossless inspection; checkout preserved.");
+      }
       const state = await lockState(record);
       if (state.kind === "live" || state.kind === "foreign") {
         throw new WorktreeRemovalLockError(
@@ -974,15 +1011,64 @@ export class ManagedWorktreeService {
         if (!params.allowSnapshotLoss) {
           throw new WorktreeSnapshotError(snapshotError, { cause: error });
         }
+        snapshotRef = undefined;
+      }
+      const snapshot =
+        snapshotError || !snapshotRef
+          ? undefined
+          : await requireGit(
+              record.repoRoot,
+              ["rev-parse", "--verify", `${snapshotRef}^{commit}`],
+              gitOptions,
+            );
+      const deletionOptions =
+        snapshot && snapshotRef
+          ? await prepareSnapshotBranchDeletion(record, snapshotRef, snapshot, gitOptions)
+          : undefined;
+      if (
+        (await requireManagedWorktreeHead(record, gitOptions)) !== head ||
+        (snapshot &&
+          (await requireGit(record.repoRoot, ["rev-parse", `${snapshot}^`], gitOptions)) !== head)
+      ) {
+        throw new Error(
+          "Worktree HEAD changed after snapshot preparation; checkout and branch preserved.",
+        );
       }
       timing?.markRemovalStage("checkoutRemoval");
       params.signal?.throwIfAborted();
       params.commitGuard?.();
+      if (params.requireLossless && snapshot) {
+        // The snapshot sees hidden index edits that status alone can miss.
+        const changed = await requireGit(
+          record.repoRoot,
+          ["diff-tree", "--no-commit-id", "--name-only", "-r", head, snapshot],
+          gitOptions,
+        );
+        if (changed) {
+          abortWorktreeRemoval(this.env, record.id, claimToken);
+          updateRegistryWorktree(
+            this.env,
+            record.id,
+            {
+              runEndCleanup: { outcome: "retained-dirty", at: this.now() },
+            },
+            { onlyIfLive: true, onlyIfActiveAt: record.lastActiveAt },
+          );
+          return { removed: false };
+        }
+      }
+      // Pin the completed capture before deletion. Failed or interrupted deletion
+      // must never replace it with a snapshot of a partially removed checkout.
+      await requireGit(
+        record.repoRoot,
+        ["update-ref", pendingRef, snapshot ?? head, ""],
+        gitOptions,
+      );
       // Once admitted, let deletion settle; cancellation could leave a partial checkout
       // that a later removal would snapshot over the complete recovery snapshot.
       const removed = await runGit(
         record.repoRoot,
-        ["worktree", "remove", "--force", record.path],
+        ["worktree", "remove", ...(params.requireLossless ? [] : ["--force"]), "--", record.path],
         { beforeRun: params.commitGuard, killProcessTree: true },
       );
       if (removed.code !== 0) {
@@ -990,19 +1076,9 @@ export class ManagedWorktreeService {
       }
       timing?.markRemovalStage("finalization");
       params.commitGuard?.();
-      const branchDelete = await runGit(record.repoRoot, ["branch", "-D", record.branch], {
-        signal: params.signal,
-        beforeRun: params.commitGuard,
-        killProcessTree: true,
-      });
-      if (branchDelete.code !== 0) {
-        throw commandError("git branch -D", branchDelete);
+      if (deletionOptions) {
+        await requireGit(record.repoRoot, ["branch", "-d", "--", record.branch], deletionOptions);
       }
-      await requireGit(record.repoRoot, ["worktree", "prune"], {
-        signal: params.signal,
-        beforeRun: params.commitGuard,
-        killProcessTree: true,
-      });
       // Only prune the recorded checkout's empty parent; a changed allocation
       // root is neither required for removal nor authority to walk other parents.
       await fs.rmdir(path.dirname(record.path)).catch(() => undefined);
@@ -1016,6 +1092,11 @@ export class ManagedWorktreeService {
         ...(params.runEndCleanup ? { runEndCleanup: params.runEndCleanup } : {}),
       });
       finalizeWorktreeRemoval(this.env, record.id);
+      await requireGit(
+        record.repoRoot,
+        ["update-ref", "-d", pendingRef, snapshot ?? head],
+        gitOptions,
+      );
       return {
         removed: true,
         ...(snapshotRef ? { snapshotRef } : {}),
@@ -1102,7 +1183,7 @@ export class ManagedWorktreeService {
       worktreeRoot: path.dirname(path.dirname(record.path)),
       destination: record.path,
       base: parent,
-      branch: record.branch,
+      branch: record.branch ? { mode: "create", name: record.branch } : undefined,
       deferGitCheckout: true,
       requireSpace: (cloneBytes) =>
         this.requireAllocationSpace(
@@ -1189,6 +1270,11 @@ export class ManagedWorktreeService {
     // Clear any lease rows or removal marker stranded by a crash between git removal
     // and finalize so the restored worktree admits runs again.
     finalizeWorktreeRemoval(this.env, params.id);
+    await requireGit(
+      record.repoRoot,
+      ["update-ref", "-d", `refs/openclaw/removals/${record.id}`],
+      gitOptions,
+    );
     const restored = { ...record, lastActiveAt };
     delete restored.removedAt;
     delete restored.runEndCleanup;
@@ -1197,6 +1283,7 @@ export class ManagedWorktreeService {
 
   async removeIfLossless(id: string): Promise<boolean> {
     let record = this.requireLiveRecord(id);
+    let inspectedHead: string;
     const claimToken = randomUUID();
     const recordOutcome = (outcome: ManagedWorktreeRunEndCleanupOutcome, error?: unknown) => {
       // Retained/failed writes happen after this remover released or aborted its
@@ -1245,6 +1332,7 @@ export class ManagedWorktreeService {
     }
     try {
       record = await this.rebindLiveRepository(record);
+      inspectedHead = await requireManagedWorktreeHead(record, {});
       const inspection = await runGitWorkerOperation({
         type: "worktree.cleanup-inspection",
         input: {
@@ -1271,18 +1359,20 @@ export class ManagedWorktreeService {
     }
     try {
       await this.release(id);
-      await this.remove({
+      const result = await this.remove({
         id,
         reason: "run-end",
         claimToken,
+        requireLossless: true,
+        inspectedHead,
         runEndCleanup: { outcome: "removed-lossless", at: this.now() },
       });
+      return result.removed;
     } catch (error) {
       abortWorktreeRemoval(this.env, id, claimToken);
       recordOutcome("failed", error);
       throw error;
     }
-    return true;
   }
 
   async removeIfLosslessByPath(
@@ -1305,6 +1395,7 @@ export class ManagedWorktreeService {
 
   async gc(params: ManagedWorktreeGcParams = {}): Promise<ManagedWorktreeGcResult> {
     const now = this.now();
+    const isLocked = createWorktreeLockPrefilter();
     let removed: string[] = [];
     const records = listRegistryWorktrees(this.env);
     for (const record of records) {
@@ -1323,7 +1414,7 @@ export class ManagedWorktreeService {
           expiresWhenIdle &&
           (retiredOwner || now - record.lastActiveAt > IDLE_GC_MS)
         ) {
-          if (await this.isProtectedFromAutoRemoval(record, params.shouldProtectOwner)) {
+          if (await this.isProtectedFromAutoRemoval(record, isLocked, params.shouldProtectOwner)) {
             continue;
           }
           await this.remove({
@@ -1340,7 +1431,7 @@ export class ManagedWorktreeService {
     try {
       // Empty caches must not wait behind checkout creation. Collection rereads
       // the templates under the lease before retiring any artifacts.
-      if (listTemplates(this.env).length > 0) {
+      if (hasTemplates(this.env)) {
         await this.withAllocationLease({}, async (guard) => {
           await collectWorktreeTemplates(this.env, now - IDLE_GC_MS, {
             signal: guard.signal,
@@ -1351,7 +1442,7 @@ export class ManagedWorktreeService {
     } catch (error) {
       log.warn(`worktree template cleanup deferred: ${String(error)}`);
     }
-    removed = removed.concat(await this.enforceCleanupLimits(params));
+    removed = removed.concat(await this.enforceCleanupLimits(params, isLocked));
     const orphansDeleted = await this.reconcileOrphans(records);
     let snapshotsPruned = 0;
     for (const record of listRegistryWorktrees(this.env)) {
@@ -1377,11 +1468,23 @@ export class ManagedWorktreeService {
               commitGuard: () => guard.commitGuard?.(),
             });
           }
-          if (current.snapshotRef && (await worktreePathExists(current.repoRoot))) {
-            await requireGit(current.repoRoot, ["update-ref", "-d", current.snapshotRef], {
-              signal: guard.signal,
-              beforeRun: guard.commitGuard,
-            });
+          if (await worktreePathExists(current.repoRoot)) {
+            if (current.snapshotRef) {
+              await requireGit(current.repoRoot, ["update-ref", "-d", current.snapshotRef], {
+                signal: guard.signal,
+                beforeRun: guard.commitGuard,
+              });
+            }
+            // Snapshot-loss removal can leave only a pending HEAD pin.
+            // Keep its registry owner until that pin has been cleared too.
+            await requireGit(
+              current.repoRoot,
+              ["update-ref", "-d", `refs/openclaw/removals/${current.id}`],
+              {
+                signal: guard.signal,
+                beforeRun: guard.commitGuard,
+              },
+            );
           }
           guard.commitGuard?.();
           deleteRegistryWorktree(this.env, current.id);
@@ -1401,12 +1504,9 @@ export class ManagedWorktreeService {
     return { removed, orphansDeleted, snapshotsPruned };
   }
 
-  /**
-   * Shared auto-removal guard: owners, leases, nested repositories, and live or
-   * foreign Git locks veto removal; a dead lock is cleared.
-   */
   private async isProtectedFromAutoRemoval(
     record: ManagedWorktreeRecord,
+    isLocked: ReturnType<typeof createWorktreeLockPrefilter>,
     shouldProtectOwner?: (ownerKind: ManagedWorktreeOwnerKind, ownerId: string) => boolean,
   ): Promise<boolean> {
     if (
@@ -1429,12 +1529,8 @@ export class ManagedWorktreeService {
     if (provisioned.retainedReason !== undefined) {
       return true;
     }
-    const state = await lockState(record);
-    if (state.kind === "live" || state.kind === "foreign") {
+    if (await isLocked(record)) {
       return true;
-    }
-    if (state.kind === "dead") {
-      await requireGit(record.repoRoot, ["worktree", "unlock", record.path]);
     }
     const nested = await runGitWorkerOperation({
       type: "worktree.cleanup-inspection",
@@ -1451,7 +1547,10 @@ export class ManagedWorktreeService {
    * Manual worktrees count toward the totals but are never limit-evicted, so a
    * limit can stay exceeded when only protected worktrees remain.
    */
-  private async enforceCleanupLimits(params: ManagedWorktreeGcParams): Promise<string[]> {
+  private async enforceCleanupLimits(
+    params: ManagedWorktreeGcParams,
+    isLocked: ReturnType<typeof createWorktreeLockPrefilter>,
+  ): Promise<string[]> {
     const limits = params.limits ?? resolveWorktreeCleanupLimits();
     if (limits.maxCount === undefined && limits.maxTotalSizeBytes === undefined) {
       return [];
@@ -1517,7 +1616,7 @@ export class ManagedWorktreeService {
         continue;
       }
       try {
-        if (await this.isProtectedFromAutoRemoval(record, params.shouldProtectOwner)) {
+        if (await this.isProtectedFromAutoRemoval(record, isLocked, params.shouldProtectOwner)) {
           continue;
         }
         await this.remove({
