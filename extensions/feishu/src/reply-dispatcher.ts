@@ -1727,6 +1727,15 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       // otherwise an explicit channel block-off keeps emitting them when no
       // preview card can render.
       suppressToolProgressMessages: !previewStreamingEnabled && !blockStreamingEnabled,
+      // Claim the mid-turn narration lanes so assistant text emitted before
+      // tool calls never leaks as a turn-end reply payload (delivered after
+      // the final on cores that do not gate that lane): with the preview
+      // active the pre-tool text bridges into the streaming card commentary
+      // line, and while blocks carry the turn it flows through the durable
+      // commentary lane instead. Without an owner on either side the core
+      // keeps its default reply classification.
+      commentaryProgressEnabled: previewStreamingEnabled,
+      commentaryPayloadsEnabled: blockStreamingEnabled,
       onPartialReply: previewStreamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {

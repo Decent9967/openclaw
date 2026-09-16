@@ -1553,6 +1553,42 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     expect(result.replyOptions).toHaveProperty("disableBlockStreaming", true);
   });
 
+  it("claims commentary lanes so pre-tool narration never leaks as a late reply", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "auto",
+        streaming: { mode: "partial" },
+      },
+    });
+
+    const { result } = createDispatcherHarness();
+    expect(result.replyOptions).toHaveProperty("commentaryProgressEnabled", true);
+    expect(result.replyOptions).toHaveProperty("commentaryPayloadsEnabled", false);
+  });
+
+  it("routes narration through the durable commentary lane while blocks carry the turn", () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "auto",
+        streaming: { mode: "off" },
+      },
+    });
+
+    const { result } = createDispatcherHarness({
+      cfg: { agents: { defaults: { blockStreamingDefault: "on" } } } as never,
+    });
+    expect(result.replyOptions).toHaveProperty("commentaryProgressEnabled", false);
+    expect(result.replyOptions).toHaveProperty("commentaryPayloadsEnabled", true);
+  });
+
   it("suppresses core default progress messages when preview and blocks are both off", () => {
     resolveFeishuAccountMock.mockReturnValue({
       accountId: "main",
