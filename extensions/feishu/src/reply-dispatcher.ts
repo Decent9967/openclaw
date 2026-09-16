@@ -1373,6 +1373,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       }
       // The streaming card starts lazily on the first work event or streamed
       // text, like the other draft channels; no eager placeholder card here.
+      // A message queued behind an active run settles without a final, and
+      // that settlement closes streaming with a sealed progress gate; the
+      // SDK contract reopens the gate for the admitted turn via
+      // beginNewTurn() (a no-op while the gate is already open).
+      progressCompositor.beginNewTurn();
       await Promise.resolve(typingCallbacks?.onReplyStart?.());
     },
     onIdle: () => queueIdleSideEffects(),

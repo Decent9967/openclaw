@@ -297,6 +297,27 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     });
   });
 
+  it("reopens the progress gate for a turn admitted after a queued settlement", async () => {
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial", "feishu"));
+    const { result, options } = createDispatcherHarness();
+
+    // First turn completes normally; the close seals the progress gate.
+    const first = await options.deliver({ text: "first final" }, { kind: "final" });
+    const firstIdle = Promise.resolve(options.onIdle?.());
+    await firstIdle;
+    await first?.finalization;
+
+    // A message queued behind that run settles without a final; its idle
+    // settlement closes streaming again while the gate stays sealed.
+    await options.onIdle?.();
+
+    // The queued turn is admitted and starts working: the gate must reopen
+    // so the first work event of the admitted turn starts a fresh card.
+    await options.onReplyStart?.();
+    await result.replyOptions.onToolStart?.({ name: "web_search", phase: "start" });
+    expect(streamingInstances.length).toBeGreaterThan(1);
+  });
+
   it.each(["reply_payload_sending", "message_sending"])(
     "suppresses all pre-hook CardKit previews when %s is registered",
     async (hookName) => {
