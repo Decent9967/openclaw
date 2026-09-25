@@ -1,5 +1,3 @@
-// Memory Core plugin module implements manager embedding ops behavior.
-import fs from "node:fs/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import {
@@ -12,10 +10,8 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/memory-core-host-engi
 import {
   buildFileEntry,
   buildMultimodalChunkForIndexing,
-  isFileMissingError,
   MEMORY_EMBEDDING_CACHE_TABLE,
   MEMORY_SEARCH_DEADLINE_CONTROL,
-  retryTransientMemoryRead,
   runWithConcurrency,
   type MemoryChunk,
   type MemorySearchDeadlineControl,
@@ -37,7 +33,7 @@ import { readSessionResetRecallCutoffMetadata } from "../session-reset-recall-me
 import type { EmbeddingProvider } from "./embeddings.js";
 import type { IndexedMemoryChunk } from "./manager-chunk-writer.js";
 import { prepareMemoryIndexInWorker } from "./manager-cpu-worker-runtime.js";
-import { readMemoryDatabaseRevision } from "./manager-db.js";
+import { readMemoryDatabaseRevision } from "./manager-db-kernel.js";
 import {
   clearMemoryEmbeddingCacheIdentities,
   collectMemoryCachedEmbeddings,
@@ -54,6 +50,7 @@ import {
   runMemoryEmbeddingRetryLoop,
 } from "./manager-embedding-policy.js";
 import { resolveChunkProvenance } from "./manager-index-preparation.js";
+import { readMemoryIndexSource } from "./manager-index-source.js";
 import {
   resolveMemoryIndexProviderIdentities,
   type MemoryIndexProviderIdentity,
@@ -133,10 +130,6 @@ function formatBatchSourceCounts(counts: Record<string, number>): string {
       .map(([source, count]) => `${source}=${count}`)
       .join(",") || "none"
   );
-}
-
-function splitSourceWideEmbeddingChunks<T>(chunks: T[], maxRequests: number): T[][] {
-  return chunkItems(chunks, Math.max(1, Math.floor(maxRequests)));
 }
 
 function resolveEmbeddingTimeoutMs(params: {
@@ -465,12 +458,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     context: Record<string, unknown> = {},
   ) {
     return (message: string, data?: Record<string, unknown>) =>
-      log.debug(
-        message,
-        data
-          ? { ...data, source, chunks: chunks.length, ...context }
-          : { source, chunks: chunks.length, ...context },
-      );
+      log.debug(message, { ...data, source, chunks: chunks.length, ...context });
   }
 
   private async embedChunksWithBatch(
@@ -739,7 +727,7 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         let valid = entryValidity.get(candidate.entry);
         if (valid === undefined) {
           if (candidate.source === "memory") {
-            const current = await buildFileEntry(
+            const current = await (this.memoryFiles?.inspectFile ?? buildFileEntry)(
               candidate.entry.absPath,
               this.workspaceDir,
               this.settings.multimodal,
@@ -938,11 +926,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
   ): Promise<void> {
     await withMemoryWorkspaceLock(this.workspaceDir, async () => {
       const database = this.database;
-      const shadowDeadline =
-        database.isShadow && source === "sessions"
-          ? database.captureShadowWriteDeadline()
-          : undefined;
       const assertCurrent = () => {
+        this.memoryFiles?.assertCurrent();
         if (
           this.closed ||
           database.closed ||
@@ -987,9 +972,9 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
             }
           : { source }),
       });
-      const prepare = async (): Promise<MemorySourceIndexReplacement | undefined> => {
+      const prepare = async (): Promise<boolean> => {
         if (source === "memory") {
-          const current = await buildFileEntry(
+          const current = await (this.memoryFiles?.inspectFile ?? buildFileEntry)(
             entry.absPath,
             this.workspaceDir,
             this.settings.multimodal,
@@ -999,51 +984,20 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
             log.debug("memory source changed while indexing; queued incremental retry", {
               path: entry.path,
             });
-            return undefined;
+            return false;
           }
         }
-        return createReplacement();
+        assertCurrent();
+        return true;
       };
-      const sessionReplacement = source === "sessions" ? createReplacement() : undefined;
-      const staging =
-        shadowDeadline !== undefined && sessionReplacement?.source === "sessions"
-          ? await database.replaceShadowSession(sessionReplacement, assertCurrent, shadowDeadline)
-          : undefined;
-      const published =
-        staging?.kind === "staged"
-          ? { databaseRevision: undefined }
-          : await runSqliteImmediateTransaction(
-              database.db,
-              async () => {
-                const replacement = await prepare();
-                if (!replacement) {
-                  return undefined;
-                }
-                return () => {
-                  assertCurrent();
-                  if (
-                    generation &&
-                    database.db === generation.database.db &&
-                    readMemoryDatabaseRevision(database.db) !== generation.databaseRevision
-                  ) {
-                    generation.cacheWritesInvalidated = true;
-                  }
-                  database.sourceIndex.replace(replacement);
-                  return {
-                    databaseRevision:
-                      generation && database.db === generation.database.db
-                        ? readMemoryDatabaseRevision(database.db)
-                        : undefined,
-                  };
-                };
-              },
-              staging?.kind === "caller" ? { beginDeadlineNs: staging.beginDeadlineNs } : undefined,
-              (write) => this.withDatabaseWrite(write),
-            );
+      const published = await database.replaceSource(createReplacement(), assertCurrent, prepare);
       if (!published) {
         return;
       }
-      if (generation && published.databaseRevision !== undefined) {
+      if (generation && database === generation.database) {
+        if (published.beforeRevision !== generation.databaseRevision) {
+          generation.cacheWritesInvalidated = true;
+        }
         // Admission can resume another writer before this continuation runs.
         // Adopt only the revision captured by our committed publication.
         generation.databaseRevision = published.databaseRevision;
@@ -1068,18 +1022,23 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     const kind = entry.kind;
     const suppliedContent = options.content ?? entry.content;
     const prepare = async (): Promise<PreparedMemoryIndexEntry | null> => {
-      const pathClassification = await resolveMemoryPathClassification({
-        absolutePath: entry.absPath,
-        source,
-        workspaceDir: this.workspaceDir,
-      });
       if (kind === "multimodal") {
-        const multimodalChunk = await buildMultimodalChunkForIndexing(entry);
+        const multimodalChunk: Awaited<
+          ReturnType<NonNullable<typeof this.memoryFiles>["buildMultimodalChunk"]>
+        > = await (this.memoryFiles?.buildMultimodalChunk ?? buildMultimodalChunkForIndexing)(
+          entry,
+        );
         if (!multimodalChunk) {
           this.dirty = true;
           await this.deleteIndexedFile(entry.path, source);
           return null;
         }
+        const pathClassification = await resolveMemoryPathClassification({
+          absolutePath: entry.absPath,
+          source,
+          workspaceDir: this.workspaceDir,
+          readSource: this.memoryFiles ? multimodalChunk : undefined,
+        });
         const chunk: IndexedMemoryChunk = {
           ...multimodalChunk.chunk,
           importance: null,
@@ -1100,18 +1059,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         };
       }
 
-      const content =
-        suppliedContent ??
-        (await retryTransientMemoryRead(
-          () => fs.readFile(entry.absPath, "utf-8"),
-          `read memory markdown for indexing ${entry.absPath}`,
-        ).catch((err: unknown) => {
-          if (source !== "memory" || !isFileMissingError(err)) {
-            throw err;
-          }
-          return null;
-        }));
-      if (content === null) {
+      const read = await readMemoryIndexSource({
+        absolutePath: entry.absPath,
+        workspaceDir: this.workspaceDir,
+        source,
+        suppliedContent,
+        memoryFiles: this.memoryFiles,
+      });
+      if (!read) {
         this.dirty = true;
         return null;
       }
@@ -1124,8 +1079,8 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           lineProvenance: entry.lineProvenance,
         },
         source,
-        content,
-        pathClassification,
+        content: read.content,
+        pathClassification: read.pathClassification,
         chunking: this.settings.chunking,
         cutoffLine: cutoff.state === "valid" ? cutoff.cutoffLine : undefined,
         provider:
@@ -1203,22 +1158,19 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       const candidates = current.flatMap((item) =>
         item.chunks.map((chunk) => ({ chunk, entry: item.entry, source: item.source })),
       );
-      const chunks = candidates.map((candidate) => candidate.chunk);
+      const chunkCount = candidates.length;
       const sourceCounts = countBatchSources(current);
       const source = formatBatchSourceLabel(sourceCounts);
       sourceWideBatchGroup += 1;
-      const chunkBatches = splitSourceWideEmbeddingChunks(
-        candidates,
-        SOURCE_WIDE_BATCH_MAX_REQUESTS,
-      );
+      const chunkBatches = chunkItems(candidates, SOURCE_WIDE_BATCH_MAX_REQUESTS);
       log.debug(
-        `memory embeddings: source-wide batch submit group=${sourceWideBatchGroup} source=${source} files=${current.length} chunks=${chunks.length} requests=${chunkBatches.length} sources=${formatBatchSourceCounts(
+        `memory embeddings: source-wide batch submit group=${sourceWideBatchGroup} source=${source} files=${current.length} chunks=${chunkCount} requests=${chunkBatches.length} sources=${formatBatchSourceCounts(
           sourceCounts,
         )} reason=${reason}`,
         {
           source,
           files: current.length,
-          chunks: chunks.length,
+          chunks: chunkCount,
           requests: chunkBatches.length,
           sources: sourceCounts,
           group: sourceWideBatchGroup,
@@ -1240,13 +1192,18 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
           })),
         );
       }
+      candidates.length = 0;
+      chunkBatches.length = 0;
       const sample = embeddings.find((embedding) => embedding.length > 0);
       const vectorReady = sample ? await this.ensureVectorReady(sample.length) : false;
       let offset = 0;
       for (const item of current) {
         const fileEmbeddings = embeddings.slice(offset, offset + item.chunks.length);
-        offset += item.chunks.length;
         await this.writeChunks(item, generation, fileEmbeddings, vectorReady);
+        // Publication has settled; later files must not retain completed vectors.
+        // oxlint-disable-next-line unicorn/no-array-fill-with-reference-type -- Completed slots are never read or mutated.
+        embeddings.fill([], offset, offset + item.chunks.length);
+        offset += item.chunks.length;
       }
       prepared = [];
       preparedRequestCount = 0;
@@ -1317,24 +1274,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
 
     let embeddings: number[][];
     try {
+      const candidates = prepared.chunks.map((chunk) => ({
+        chunk,
+        entry: prepared.entry,
+        source: prepared.source,
+      }));
       embeddings = this.batch.enabled
-        ? await this.embedChunksWithBatch(
-            prepared.chunks.map((chunk) => ({
-              chunk,
-              entry: prepared.entry,
-              source: prepared.source,
-            })),
-            options.source,
-            generation,
-          )
-        : await this.embedChunksInBatches(
-            prepared.chunks.map((chunk) => ({
-              chunk,
-              entry: prepared.entry,
-              source: prepared.source,
-            })),
-            generation,
-          );
+        ? await this.embedChunksWithBatch(candidates, options.source, generation)
+        : await this.embedChunksInBatches(candidates, generation);
     } catch (err) {
       const message = formatErrorMessage(err);
       if (

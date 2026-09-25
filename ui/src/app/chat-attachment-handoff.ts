@@ -4,7 +4,7 @@ import type {
   ChatGoalDraftMode,
   HumanMention,
 } from "../lib/chat/chat-types.ts";
-import { releaseChatAttachmentPayloads } from "../pages/chat/attachment-payload-store.ts";
+import { releaseChatAttachmentPayloads } from "../pages/chat/attachment-payload-lifecycle.ts";
 import type { NewSessionDraftHandoff } from "../pages/new-session/draft-persistence.ts";
 import type { ApplicationChatAttachmentHandoff } from "./context.ts";
 
@@ -30,8 +30,6 @@ export function createChatAttachmentHandoff(): ApplicationChatAttachmentHandoff 
   const pending = new Map<string, PendingChatAttachmentHandoff>();
   let disposed = false;
 
-  const release = (attachments: readonly ChatAttachment[] = []) =>
-    releaseChatAttachmentPayloads(attachments);
   const handoffAttachments = (handoff: PendingChatAttachmentHandoff) => {
     const byId = new Map(handoff.attachments.map((attachment) => [attachment.id, attachment]));
     for (const fallback of Object.values(handoff.fallbacks)) {
@@ -48,7 +46,9 @@ export function createChatAttachmentHandoff(): ApplicationChatAttachmentHandoff 
     if (!handoff) {
       return;
     }
-    release(handoffAttachments(handoff).filter((attachment) => !retainedIds.has(attachment.id)));
+    releaseChatAttachmentPayloads(
+      handoffAttachments(handoff).filter((attachment) => !retainedIds.has(attachment.id)),
+    );
   };
   const entryKey = (paneId: string, scopeKey: string) => JSON.stringify([paneId, scopeKey]);
   const take = (key: string) => {
@@ -87,9 +87,9 @@ export function createChatAttachmentHandoff(): ApplicationChatAttachmentHandoff 
       }
       releaseHandoff(previous, retainedIds);
       if (!owner || disposed) {
-        release(attachments);
+        releaseChatAttachmentPayloads(attachments);
         for (const fallback of Object.values(fallbacks)) {
-          release(fallback.attachments);
+          releaseChatAttachmentPayloads(fallback.attachments);
         }
         return;
       }
@@ -137,6 +137,18 @@ export function createChatAttachmentHandoff(): ApplicationChatAttachmentHandoff 
       }
       releaseHandoff(match);
       return null;
+    },
+    retainedAttachmentIds: (attachments) => {
+      const requested = new Set(attachments.map((attachment) => attachment.id));
+      const retained = new Set<string>();
+      for (const handoff of pending.values()) {
+        for (const attachment of handoffAttachments(handoff)) {
+          if (requested.has(attachment.id)) {
+            retained.add(attachment.id);
+          }
+        }
+      }
+      return retained;
     },
     retireScope: (scopeKey, beforeRevision) => {
       // Optimistic navigation may unmount the pane before deletion confirms.

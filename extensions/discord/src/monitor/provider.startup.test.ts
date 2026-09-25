@@ -96,14 +96,13 @@ vi.mock("./listeners.js", () => ({
   DiscordThreadDeleteListener: function DiscordThreadDeleteListener() {
     return { type: "thread-delete" };
   },
+  DiscordThreadReadyListener: function DiscordThreadReadyListener() {
+    return { type: "thread-ready" };
+  },
   DiscordThreadUpdateListener: function DiscordThreadUpdateListener() {
     return { type: "thread-update" };
   },
   registerDiscordListener: vi.fn(),
-}));
-
-vi.mock("./presence.js", () => ({
-  resolveDiscordPresenceUpdate: vi.fn(() => undefined),
 }));
 
 import { createRuntimeSpies } from "../../../test-support/runtime-spies.js";
@@ -170,7 +169,6 @@ describe("createDiscordMonitorClient", () => {
     const gatewayPlugin = {
       id: "gateway",
       registerClient: vi.fn(),
-      registerRoutes: vi.fn(),
     } as Plugin;
 
     const result = await createDiscordMonitorClient({
@@ -263,7 +261,6 @@ describe("createDiscordMonitorClient", () => {
     const [options, handlers, plugins] = firstCreateClientCall(createClient);
     expect((options as { requestOptions?: unknown } | undefined)?.requestOptions).toEqual({
       timeout: DISCORD_REST_TIMEOUT_MS,
-      runtimeProfile: "persistent",
       maxQueueSize: 1000,
     });
     expect((options as { commandDeployHashStore?: unknown }).commandDeployHashStore).toBe(
@@ -301,7 +298,6 @@ describe("createDiscordMonitorClient", () => {
     const [options, handlers, plugins] = firstCreateClientCall(createClient);
     expect((options as { requestOptions?: unknown } | undefined)?.requestOptions).toEqual({
       timeout: DISCORD_REST_TIMEOUT_MS,
-      runtimeProfile: "persistent",
       maxQueueSize: 1000,
       fetch: restFetch,
     });
@@ -402,6 +398,7 @@ describe("registerDiscordMonitorListeners", () => {
       "reaction-add",
       "reaction-remove",
       "thread-update",
+      "thread-ready",
       "thread-delete",
       "presence",
       "presence-guild-create",

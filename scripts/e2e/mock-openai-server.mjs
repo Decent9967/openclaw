@@ -5,6 +5,7 @@ import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { escapeRegExp } from "../lib/regexp.mjs";
 import { readPositiveIntEnv, readTcpPortEnv } from "./lib/env-limits.mjs";
+import { summarizeMockInferenceRequest } from "./lib/mock-inference-facts.ts";
 import {
   boundedRequestLogBody,
   isRequestBodyTooLargeError,
@@ -13,6 +14,7 @@ import {
   writeJson,
   writeSse,
 } from "./lib/mock-openai-http.mjs";
+import { createTelegramBindingScenario } from "./lib/telegram-binding-scenario.mjs";
 
 const port =
   process.env.MOCK_PORT?.trim() === "0"
@@ -45,6 +47,7 @@ const LEGACY_MEDIA_PATTERN =
 const MEDIA_DATA_URL_PATTERN =
   /^data:([a-z][a-z0-9.+-]*\/[a-z0-9.+-]+)(?:;[^,]*)*;base64,([\s\S]*)$/iu;
 let scriptState;
+const telegramBindingScenario = createTelegramBindingScenario();
 
 function parseMediaDataUrl(value) {
   if (typeof value !== "string") {
@@ -550,7 +553,7 @@ function progressDraftEvents(body, bodyText) {
       return null;
     }
     return preambleThenToolCallEvents("Checking the workspace before answering.", "exec", {
-      command: "sleep 3 && echo openclaw-draft-proof",
+      command: "sleep 2 && echo openclaw-draft-proof",
     });
   }
   return responseEvents("OPENCLAW_E2E_DRAFTPROOF");
@@ -769,8 +772,10 @@ function mcpCodeModeApiFileEvents(body, bodyText) {
   if (!/mcp code mode api file qa check/i.test(allText)) {
     return null;
   }
-  const toolOutput = collectFunctionCallOutputText(body);
-  if (!toolOutput) {
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const latestOutput = input.findLast((item) => item?.type === "function_call_output");
+  const toolOutput = stringifyFunctionCallOutput(latestOutput?.output) ?? "";
+  if (!latestOutput) {
     if (!hasDeclaredTool(bodyText, "exec")) {
       return null;
     }
@@ -779,7 +784,7 @@ function mcpCodeModeApiFileEvents(body, bodyText) {
         ? "ALL_TOOLS.some((tool) => tool.source === 'mcp')"
         : "catalog.all().some((tool) => tool.source === 'mcp')";
     return toolCallEvents("exec", {
-      language: "javascript",
+      title: "Read the MCP fixture note",
       code: [
         'const files = await API.list("mcp");',
         'const root = await API.read("mcp/index.d.ts");',
@@ -796,9 +801,23 @@ function mcpCodeModeApiFileEvents(body, bodyText) {
       ].join("\n"),
     });
   }
+  let toolJson;
+  try {
+    toolJson = JSON.parse(toolOutput);
+  } catch {
+    // Non-JSON output still follows the fixture's failure checks below.
+  }
   if (
-    !/MCP_CODE_MODE_FILE_TOOL_RESULT/.test(toolOutput) ||
-    !/fixture-note-alpha/.test(toolOutput)
+    toolJson?.status === "waiting" &&
+    typeof toolJson.runId === "string" &&
+    toolJson.runId.length > 0 &&
+    hasDeclaredTool(bodyText, "wait")
+  ) {
+    return toolCallEvents("wait", { runId: toolJson.runId });
+  }
+  if (
+    !toolOutput.includes("MCP_CODE_MODE_FILE_TOOL_RESULT") ||
+    !toolOutput.includes("fixture-note-alpha")
   ) {
     return responseEvents(
       "MCP_CODE_MODE_FILE_FAIL unclear=code-mode-exec-did-not-return-fixture-note",
@@ -842,6 +861,16 @@ function agentPluginBundleEvents(body, bodyText) {
     toolOutput.includes("PLUGIN_DATA=")
     ? responseEvents("AGENT_BUNDLE_MCP_OK")
     : responseEvents("AGENT_BUNDLE_MCP_FAIL unexpected-tool-output");
+}
+
+function telegramBindingEvents(body) {
+  const response = telegramBindingScenario(body);
+  if (!response) {
+    return null;
+  }
+  return response.spawn
+    ? toolCallEvents("sessions_spawn", response.spawn)
+    : responseEvents(response.text);
 }
 
 function countAutomaticSelection(events) {
@@ -915,8 +944,10 @@ const server = http.createServer((req, res) => {
           seq: (requestLogSeq += 1),
           method: req.method,
           path: url.pathname,
+          requestBytes: Buffer.byteLength(bodyText),
           body: boundedRequestLogBody(requestLogBody, requestLogBody),
           ...summarizeRequestContent(body),
+          ...(scriptedRoute ? { inferenceFacts: summarizeMockInferenceRequest(body) } : {}),
           ...(selectedResponse?.scriptEntry ? { scriptEntry: selectedResponse.scriptEntry } : {}),
         },
       })
@@ -938,7 +969,8 @@ const server = http.createServer((req, res) => {
           agentPluginBundleEvents(body, bodyText) ??
           mcpAppConformanceEvents(body, bodyText) ??
           mcpCodeModeApiFileEvents(body, bodyText) ??
-          progressDraftEvents(body, bodyText);
+          progressDraftEvents(body, bodyText) ??
+          telegramBindingEvents(body);
         if (events) {
           countAutomaticSelection(events);
           writeResponsesEvents(res, body.stream, events);
@@ -990,7 +1022,7 @@ const server = http.createServer((req, res) => {
             body.stream !== false,
             "Checking the workspace before answering.",
             "exec",
-            { command: "sleep 3 && echo openclaw-draft-proof" },
+            { command: "sleep 2 && echo openclaw-draft-proof" },
           );
           return;
         }

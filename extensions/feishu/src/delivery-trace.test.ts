@@ -1,3 +1,4 @@
+import { projectAgentToolActivity } from "openclaw/plugin-sdk/agent-harness-runtime";
 // Feishu delivery trace goldens: replayable wire-level lifecycle recordings.
 //
 // IN events are fed straight into the reply-dispatcher plan (dispatcher,
@@ -419,7 +420,15 @@ function setupFeishuTrace(
         await created.delivery.deliver({ text: step.text }, { kind: "block" });
         break;
       case "tool-progress":
-        await created.replyOptions.onToolStart?.({ name: step.name, phase: step.phase });
+        // Mirror how core projects tool activity into item events:
+        // pretty titles and phase-derived status, not raw tool names.
+        await created.replyOptions.onItemEvent?.(
+          projectAgentToolActivity({
+            name: step.name,
+            toolCallId: step.name,
+            phase: step.phase === "start" ? "start" : "result",
+          }),
+        );
         break;
       case "final":
         await created.delivery.deliver(

@@ -1,4 +1,3 @@
-// Feishu plugin module implements reply dispatcher behavior.
 import { formatReasoningMessage, resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 import {
@@ -20,6 +19,7 @@ import {
   resolveTextChunksWithFallback,
   sendMediaWithLeadingCaption,
 } from "openclaw/plugin-sdk/reply-payload";
+import type { GetReplyOptions } from "openclaw/plugin-sdk/reply-runtime";
 import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-chunking";
 import type { ClawdbotConfig, OutboundIdentity, ReplyPayload, RuntimeEnv } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
@@ -814,15 +814,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     useCard: boolean;
     infoKind?: string;
     firstChunkMentions?: MentionTarget[];
-    chunkMentions?: MentionTarget[];
-    header?: CardHeaderConfig;
-    note?: string;
-    sendChunk: (params: {
-      chunk: string;
-      isFirst: boolean;
-      mentions?: MentionTarget[];
-    }) => Promise<FeishuReplyDeliverySource>;
+    preparedPostText?: boolean;
   }): Promise<FeishuReplyDeliveryResult> => {
+    const header = paramsLocal.useCard ? resolveCardHeader(agentId, identity) : undefined;
+    const note = paramsLocal.useCard
+      ? resolveCardNote(agentId, identity, responsePrefixContextProvider())
+      : undefined;
     const chunkSource = paramsLocal.useCard
       ? paramsLocal.text
       : materializeFeishuPostMarkdownSoftBreaks(
@@ -838,7 +835,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       limit: textChunkLimit,
       mode: chunkMode,
       firstChunkMentions: paramsLocal.firstChunkMentions,
-      chunkMentions: paramsLocal.chunkMentions,
+      chunkMentions: requiredMentionTargets,
       initialChunks,
     };
     const chunks = resolveTextChunksWithFallback(
@@ -846,8 +843,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       paramsLocal.useCard
         ? chunkFeishuCardMarkdown({
             ...chunkOptions,
-            header: paramsLocal.header,
-            note: paramsLocal.note,
+            header,
+            note,
           })
         : chunkFeishuPostMarkdown(chunkOptions),
     );
@@ -855,15 +852,26 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     const acceptedChunks: string[] = [];
     for (const [index, chunk] of chunks.entries()) {
       const mentions = [
-        ...(paramsLocal.chunkMentions ?? []),
+        ...(requiredMentionTargets ?? []),
         ...(index === 0 ? (paramsLocal.firstChunkMentions ?? []) : []),
       ];
       try {
-        const result = await paramsLocal.sendChunk({
-          chunk,
-          isFirst: index === 0,
-          mentions: mentions.length > 0 ? mentions : undefined,
-        });
+        const sendParams = {
+          cfg,
+          to: sendTarget,
+          text: chunk,
+          replyToMessageId: sendReplyToMessageId,
+          replyInThread: effectiveReplyInThread,
+          allowTopLevelReplyFallback,
+          accountId,
+          ...(mentions.length > 0 ? { mentions } : {}),
+        };
+        const result = paramsLocal.useCard
+          ? await sendStructuredCardFeishu({ ...sendParams, header, note })
+          : await sendMessageFeishu({
+              ...sendParams,
+              ...(paramsLocal.preparedPostText ? { preparedPostText: true } : {}),
+            });
         results.push(result);
         acceptedChunks.push(chunk);
         markVisibleReplySent();
@@ -903,18 +911,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       useCard: false,
       infoKind,
       firstChunkMentions,
-      chunkMentions: requiredMentionTargets,
-      sendChunk: ({ chunk, mentions }) =>
-        sendMessageFeishu({
-          cfg,
-          to: sendTarget,
-          text: chunk,
-          replyToMessageId: sendReplyToMessageId,
-          replyInThread: effectiveReplyInThread,
-          allowTopLevelReplyFallback,
-          accountId,
-          ...(mentions ? { mentions } : {}),
-        }),
     });
 
   const sendMediaReplies = async (
@@ -1067,41 +1063,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     if (result?.visibleReplySent === true || !content?.trim()) {
       return result;
     }
-    const cardHeader = resolveCardHeader(agentId, identity);
-    const cardNote = resolveCardNote(agentId, identity, responsePrefixContextProvider());
-    const useRecoveryCard = withinCardTableLimit(content);
-    return await sendChunkedTextReply({
+    return sendChunkedTextReply({
       text: content,
-      useCard: useRecoveryCard,
+      useCard: withinCardTableLimit(content),
       infoKind,
-      header: cardHeader,
-      note: cardNote,
-      chunkMentions: requiredMentionTargets,
-      sendChunk: async ({ chunk, mentions }) =>
-        useRecoveryCard
-          ? await sendStructuredCardFeishu({
-              cfg,
-              to: sendTarget,
-              text: chunk,
-              replyToMessageId: sendReplyToMessageId,
-              replyInThread: effectiveReplyInThread,
-              allowTopLevelReplyFallback,
-              accountId,
-              header: cardHeader,
-              note: cardNote,
-              ...(mentions ? { mentions } : {}),
-            })
-          : await sendMessageFeishu({
-              cfg,
-              to: sendTarget,
-              text: chunk,
-              preparedPostText: true,
-              replyToMessageId: sendReplyToMessageId,
-              replyInThread: effectiveReplyInThread,
-              allowTopLevelReplyFallback,
-              accountId,
-              ...(mentions ? { mentions } : {}),
-            }),
+      preparedPostText: true,
     });
   };
 
@@ -1585,14 +1551,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }
           return mergeFeishuReplyDeliveryResults(deliveredResults, text);
         }
-        if (info?.kind === "block") {
-          startStreaming();
-          if (streamingStartPromise) {
-            await streamingStartPromise;
-          }
-        }
-
-        if (info?.kind === "final" && useStreamingCard) {
+        if (info?.kind === "block" || (info?.kind === "final" && useStreamingCard)) {
           startStreaming();
           if (streamingStartPromise) {
             await streamingStartPromise;
@@ -1656,30 +1615,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             !isStreamingStartBackedOff(account.accountId) &&
             withinCardTableLimit(text));
         if (useFallbackCard) {
-          const cardHeader = resolveCardHeader(agentId, identity);
-          const cardNote = resolveCardNote(agentId, identity, responsePrefixContextProvider());
           deliveredResults.push(
-            await sendChunkedTextReply({
-              text,
-              useCard: true,
-              infoKind: info?.kind,
-              header: cardHeader,
-              note: cardNote,
-              chunkMentions: requiredMentionTargets,
-              sendChunk: async ({ chunk, mentions }) =>
-                await sendStructuredCardFeishu({
-                  cfg,
-                  to: sendTarget,
-                  text: chunk,
-                  replyToMessageId: sendReplyToMessageId,
-                  replyInThread: effectiveReplyInThread,
-                  allowTopLevelReplyFallback,
-                  accountId,
-                  header: cardHeader,
-                  note: cardNote,
-                  ...(mentions ? { mentions } : {}),
-                }),
-            }),
+            await sendChunkedTextReply({ text, useCard: true, infoKind: info?.kind }),
           );
         } else {
           const firstChunkMentions =
@@ -1773,27 +1710,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         : undefined,
       onReasoningEnd: reasoningPreviewEnabled ? () => false : undefined,
       onToolStart: previewStreamingEnabled
-        ? (payload: {
-            name?: string;
-            phase?: string;
-            args?: Record<string, unknown>;
-            detailMode?: "explain" | "raw";
-          }) => progressCompositor.pushToolEvent(payload)
+        ? (payload: Parameters<NonNullable<GetReplyOptions["onToolStart"]>>[0]) =>
+            progressCompositor.pushToolEvent(payload)
         : undefined,
       onItemEvent: previewStreamingEnabled
-        ? (payload: {
-            itemId?: string;
-            kind?: string;
-            title?: string;
-            phase?: string;
-            status?: string;
-            toolCallId?: string;
-            name?: string;
-            summary?: string;
-            progressText?: string;
-            meta?: string;
-            commandBearing?: boolean;
-          }) => {
+        ? (payload: Parameters<NonNullable<GetReplyOptions["onItemEvent"]>>[0]) => {
             if (payload.kind === "preamble") {
               // Narration text the model authors between tool calls. The shared
               // commentary lane owns its semantics end to end — progress-status
@@ -1805,6 +1726,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                 itemId: payload.itemId,
               });
             }
+            // Non-preamble items flow through the SDK router: it filters
+            // hideFromChannelProgress/suppressChannelProgress payloads and
+            // retracts already-rendered lines for hidden updates.
             return progressCompositor.pushItemEvent(payload);
           }
         : undefined,

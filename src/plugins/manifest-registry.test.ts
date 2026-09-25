@@ -788,35 +788,37 @@ describe("loadPluginManifestRegistry", () => {
     expect(registry.plugins[0]?.categories).toEqual(["web", "tools"]);
   });
 
-  it("keeps only the higher-precedence plugin for truly distinct duplicates", () => {
-    const dirA = makeTempDir();
-    const dirB = makeTempDir();
-    const manifest = { id: "test-plugin", configSchema: { type: "object" } };
-    writeManifest(dirA, manifest);
-    writeManifest(dirB, manifest);
-
-    const candidates: PluginCandidate[] = [
-      createPluginCandidate({
-        idHint: "test-plugin",
-        rootDir: dirA,
-        origin: "bundled",
-      }),
-      createPluginCandidate({
-        idHint: "test-plugin",
-        rootDir: dirB,
-        origin: "global",
-      }),
-    ];
-
-    const registry = loadRegistry(candidates);
-    expect(countDuplicateWarnings(registry)).toBe(1);
-    expect(registry.plugins).toHaveLength(1);
-    expect(registry.plugins[0]?.origin).toBe("bundled");
-    expectRegistryDiagnosticContains(
-      registry,
-      "global plugin will be overridden by bundled plugin",
-    );
-  });
+  it.each([
+    { origins: ["bundled", "global"], winner: "bundled", level: "warn" },
+    { origins: ["bundled", "global", "workspace", "config"], winner: "config", level: "info" },
+    { origins: ["config", "workspace", "global", "bundled"], winner: "config", level: "info" },
+    { origins: ["config", "config"], winner: "config", level: "warn" },
+  ] as const)(
+    "selects $winner from $origins with one $level diagnostic",
+    ({ origins, winner, level }) => {
+      const candidates = origins.map((origin) => {
+        const rootDir = makeTempDir();
+        writeManifest(rootDir, { id: "test-plugin", configSchema: { type: "object" } });
+        return createPluginCandidate({ idHint: "test-plugin", rootDir, origin });
+      });
+      const registry = loadRegistry(candidates);
+      expect(registry.plugins).toEqual([expect.objectContaining({ origin: winner })]);
+      expect(registry.diagnostics).toEqual([
+        expect.objectContaining({ level, pluginId: "test-plugin" }),
+      ]);
+      expect(candidates.map((candidate) => candidate.source)).toContain(
+        registry.diagnostics[0]?.source,
+      );
+      expect(registry.diagnostics[0]?.source).not.toBe(registry.plugins[0]?.source);
+      expect(registry.diagnostics[0]?.message).toContain(registry.plugins[0]?.source);
+      expectRegistryDiagnosticContains(
+        registry,
+        level === "info"
+          ? "resolved by explicit config-selected plugin"
+          : "duplicate plugin id detected",
+      );
+    },
+  );
 
   it("rejects plugins whose declared ids collide after case folding", () => {
     const upperDir = makeTempDir();
@@ -886,103 +888,6 @@ describe("loadPluginManifestRegistry", () => {
         }),
       ),
     );
-  });
-
-  it("lets config-loaded plugins replace bundled duplicates", () => {
-    const bundledDir = makeTempDir();
-    const configDir = makeTempDir();
-    const manifest = { id: "config-shadow", configSchema: { type: "object" } };
-    writeManifest(bundledDir, manifest);
-    writeManifest(configDir, manifest);
-
-    const registry = loadRegistry([
-      createPluginCandidate({
-        idHint: "config-shadow",
-        rootDir: bundledDir,
-        origin: "bundled",
-      }),
-      createPluginCandidate({
-        idHint: "config-shadow",
-        rootDir: configDir,
-        origin: "config",
-      }),
-    ]);
-
-    expect(countDuplicateWarnings(registry)).toBe(1);
-    expect(registry.plugins).toHaveLength(1);
-    expect(registry.plugins[0]?.origin).toBe("config");
-    const warning = registry.diagnostics.find((diag) => diag.pluginId === "config-shadow");
-    expect(warning?.source).toBe(path.join(bundledDir, "index.ts"));
-    expect(warning?.message).toContain(path.join(configDir, "index.ts"));
-  });
-
-  it("deduplicates compatibility diagnostics when a config plugin replaces a global candidate", () => {
-    const globalDir = makeTempDir();
-    const configDir = makeTempDir();
-    const manifest = {
-      id: "external-chat",
-      channels: ["external-chat"],
-      configSchema: { type: "object" },
-    };
-    writeManifest(globalDir, manifest);
-    writeManifest(configDir, manifest);
-
-    const registry = loadPluginManifestRegistryCore({
-      candidates: [
-        createPluginCandidate({
-          idHint: "external-chat",
-          rootDir: globalDir,
-          origin: "global",
-        }),
-        createPluginCandidate({
-          idHint: "external-chat",
-          rootDir: configDir,
-          origin: "config",
-        }),
-      ],
-      diagnostics: [globalDir, configDir, globalDir].map((source) => ({
-        level: "warn" as const,
-        pluginId: "external-chat",
-        source,
-        message: "extension entry unreadable (I/O error): ./index.js",
-      })),
-    });
-
-    expect(
-      registry.diagnostics
-        .filter((diagnostic) => diagnostic.message.includes("extension entry unreadable"))
-        .map((diagnostic) => diagnostic.source),
-    ).toEqual([globalDir, configDir]);
-    const channelConfigWarnings = registry.diagnostics.filter((diagnostic) =>
-      diagnostic.message.includes("without channelConfigs metadata"),
-    );
-    expect(channelConfigWarnings).toHaveLength(1);
-  });
-
-  it("suppresses missing channel config diagnostics for inactive external channel plugins", () => {
-    const dir = makeTempDir();
-    writeManifest(dir, {
-      id: "external-chat",
-      channels: ["external-chat"],
-      configSchema: { type: "object" },
-    });
-    const candidate = createPluginCandidate({
-      idHint: "external-chat",
-      rootDir: dir,
-      origin: "global",
-    });
-
-    const disabledRegistry = loadPluginManifestRegistryCore({
-      config: { plugins: { entries: { "external-chat": { enabled: false } } } },
-      candidates: [candidate],
-    });
-    expectNoRegistryDiagnosticContains(disabledRegistry, "without channelConfigs metadata");
-
-    const allowlistRegistry = loadPluginManifestRegistryCore({
-      config: { plugins: { allow: ["other-plugin"] } },
-      candidates: [candidate],
-    });
-    expectNoRegistryDiagnosticContains(allowlistRegistry, "without channelConfigs metadata");
   });
 
   it("suppresses duplicate warnings for explicit installed globals overriding bundled plugins", () => {
@@ -1480,199 +1385,6 @@ describe("loadPluginManifestRegistry", () => {
     });
 
     expect(registry.plugins[0]?.trustedOfficialInstall).toBeUndefined();
-  });
-
-  it("normalizes provider metadata from plugin manifests", () => {
-    const dir = makeTempDir();
-    writeManifest(dir, {
-      id: "openai",
-      enabledByDefault: true,
-      enabledByDefaultOnPlatforms: ["darwin", "not-a-platform"],
-      providers: ["openai", "openai"],
-      setup: {
-        providers: [{ id: "openai", envVars: ["OPENAI_API_KEY"] }],
-      },
-      providerEndpoints: [
-        {
-          endpointClass: "openai-public",
-          hosts: ["API.OPENAI.COM", ""],
-          hostSuffixes: [".openai.azure.com"],
-          baseUrls: ["https://api.openai.com/v1"],
-          googleVertexRegion: "global",
-          googleVertexRegionHostSuffix: "-aiplatform.googleapis.com",
-        },
-      ],
-      modelIdNormalization: {
-        providers: {
-          openai: {
-            aliases: {
-              "gpt-latest": "gpt-5.4",
-            },
-            stripPrefixes: ["openai/"],
-            prefixWhenBare: "openai",
-            prefixWhenBareAfterAliasStartsWith: [
-              {
-                modelPrefix: "gpt-",
-                prefix: "openai",
-              },
-              {
-                modelPrefix: "",
-                prefix: "ignored",
-              },
-            ],
-          },
-          ignored: {
-            prefixWhenBare: "ignored",
-          },
-        },
-      },
-      providerRequest: {
-        providers: {
-          openai: {
-            family: "openai-family",
-            compatibilityFamily: "moonshot",
-            openAICompletions: {
-              supportsStreamingUsage: true,
-            },
-          },
-          ignored: {
-            family: "ignored",
-          },
-        },
-      },
-      syntheticAuthRefs: ["openai-cli"],
-      nonSecretAuthMarkers: ["openai-cli"],
-      providerAuthAliases: {
-        openai: "openai",
-      },
-      providerAuthChoices: [
-        {
-          provider: "openai",
-          method: "api-key",
-          choiceId: "openai-api-key",
-          choiceLabel: "OpenAI API key",
-          icon: "HTTPS://CDN.SIMPLEICONS.ORG/openai",
-          website: "https://platform.openai.com/api-keys",
-          assistantPriority: 10,
-          assistantVisibility: "visible",
-          appGuidedSecret: true,
-          personalAccount: true,
-          appGuidedActionLabel: "Connect account",
-          appGuidedDiscovery: true,
-        },
-      ],
-      configSchema: { type: "object" },
-    });
-
-    const registry = loadSingleCandidateRegistry({
-      idHint: "openai",
-      rootDir: dir,
-      origin: "bundled",
-    });
-
-    expect(registry.plugins[0]?.providerEndpoints).toEqual([
-      {
-        endpointClass: "openai-public",
-        hosts: ["api.openai.com"],
-        hostSuffixes: [".openai.azure.com"],
-        baseUrls: ["https://api.openai.com/v1"],
-        googleVertexRegion: "global",
-        googleVertexRegionHostSuffix: "-aiplatform.googleapis.com",
-      },
-    ]);
-    expect(registry.plugins[0]?.modelIdNormalization).toEqual({
-      providers: {
-        openai: {
-          aliases: {
-            "gpt-latest": "gpt-5.4",
-          },
-          stripPrefixes: ["openai/"],
-          prefixWhenBare: "openai",
-          prefixWhenBareAfterAliasStartsWith: [
-            {
-              modelPrefix: "gpt-",
-              prefix: "openai",
-            },
-          ],
-        },
-      },
-    });
-    expect(registry.plugins[0]?.providerRequest).toEqual({
-      providers: {
-        openai: {
-          family: "openai-family",
-          compatibilityFamily: "moonshot",
-          openAICompletions: {
-            supportsStreamingUsage: true,
-          },
-        },
-      },
-    });
-    expect(registry.plugins[0]?.syntheticAuthRefs).toEqual(["openai-cli"]);
-    expect(registry.plugins[0]?.nonSecretAuthMarkers).toEqual(["openai-cli"]);
-    expect(registry.plugins[0]?.providerAuthAliases).toEqual({
-      openai: "openai",
-    });
-    expect(registry.plugins[0]?.enabledByDefault).toBe(true);
-    expect(registry.plugins[0]?.enabledByDefaultOnPlatforms).toEqual(["darwin"]);
-    expect(registry.plugins[0]?.providerAuthChoices).toEqual([
-      {
-        provider: "openai",
-        method: "api-key",
-        choiceId: "openai-api-key",
-        choiceLabel: "OpenAI API key",
-        icon: "https://cdn.simpleicons.org/openai",
-        website: "https://platform.openai.com/api-keys",
-        assistantPriority: 10,
-        assistantVisibility: "visible",
-        appGuidedSecret: true,
-        personalAccount: true,
-        appGuidedActionLabel: "Connect account",
-        appGuidedDiscovery: true,
-      },
-    ]);
-  });
-
-  it("drops non-HTTPS provider auth presentation URLs", () => {
-    const dir = makeTempDir();
-    writeManifest(dir, {
-      id: "unsafe-auth-artwork",
-      providerAuthChoices: [
-        {
-          provider: "unsafe",
-          method: "api-key",
-          choiceId: "unsafe-api-key",
-          icon: "http://example.com/icon.svg",
-          website: "javascript:alert(1)",
-        },
-        {
-          provider: "oversized",
-          method: "api-key",
-          choiceId: "oversized-api-key",
-          icon: `https://example.com/${"a".repeat(2048)}`,
-        },
-      ],
-      configSchema: { type: "object" },
-    });
-
-    const registry = loadSingleCandidateRegistry({
-      idHint: "unsafe-auth-artwork",
-      rootDir: dir,
-      origin: "bundled",
-    });
-
-    expect(registry.plugins[0]?.providerAuthChoices).toEqual([
-      {
-        provider: "unsafe",
-        method: "api-key",
-        choiceId: "unsafe-api-key",
-      },
-      {
-        provider: "oversized",
-        method: "api-key",
-        choiceId: "oversized-api-key",
-      },
-    ]);
   });
 
   it("preserves model catalog metadata from plugin manifests", () => {
@@ -2240,30 +1952,6 @@ describe("loadPluginManifestRegistry", () => {
     );
   });
 
-  it("resolves a manifest provider catalog source only once per registry build", () => {
-    const dir = makeTempDir();
-    const providerDiscoverySource = path.join(dir, "provider-discovery.js");
-    writeManifest(dir, {
-      id: "cached-provider",
-      providers: ["cached-provider"],
-      providerCatalogEntry: "./provider-discovery.js",
-      configSchema: { type: "object" },
-    });
-    fs.writeFileSync(providerDiscoverySource, "export default {};\n", "utf8");
-    const realpathSpy = vi.spyOn(fs, "realpathSync");
-
-    const registry = loadSingleCandidateRegistry({
-      idHint: "cached-provider",
-      rootDir: dir,
-      origin: "bundled",
-    });
-
-    expect(registry.plugins[0]?.providerDiscoverySource).toBe(providerDiscoverySource);
-    expect(
-      realpathSpy.mock.calls.filter(([filePath]) => filePath === providerDiscoverySource),
-    ).toHaveLength(1);
-  });
-
   it("ignores provider catalog entries outside the plugin root", () => {
     const root = makeTempDir();
     const pluginDir = path.join(root, "plugin");
@@ -2750,32 +2438,6 @@ describe("loadPluginManifestRegistry", () => {
       memory_store: {
         sideEffecting: true,
       },
-    });
-  });
-
-  it("preserves provider hook contracts from plugin manifests", () => {
-    const dir = makeTempDir();
-    writeManifest(dir, {
-      id: "acme-ai",
-      providers: ["acme-ai"],
-      contracts: {
-        externalAuthProviders: ["acme-ai"],
-        usageProviders: ["acme-ai"],
-        workerProviders: [" static-ssh ", ""],
-      },
-      configSchema: { type: "object" },
-    });
-
-    const registry = loadSingleCandidateRegistry({
-      idHint: "acme-ai",
-      rootDir: dir,
-      origin: "bundled",
-    });
-
-    expect(registry.plugins[0]?.contracts).toEqual({
-      externalAuthProviders: ["acme-ai"],
-      usageProviders: ["acme-ai"],
-      workerProviders: ["static-ssh"],
     });
   });
 

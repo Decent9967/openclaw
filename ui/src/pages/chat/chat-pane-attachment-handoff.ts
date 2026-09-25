@@ -7,7 +7,9 @@ import {
   releaseChatAttachmentPayloads,
   releaseDisplacedChatAttachmentPayloads,
 } from "./attachment-payload-store.ts";
+import type { ChatComposerRecoveryOwner } from "./chat-send-contract.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
+import type { ChatAttachmentReadLifecycle } from "./components/chat-attachment-reads.ts";
 import {
   CHAT_COMPOSER_DRAFT_STORAGE_ERROR,
   loadChatComposerDraftRevision,
@@ -25,6 +27,8 @@ type ComposerPresentation = {
   presented: () => boolean;
   pause: () => void;
   resume: (restore?: boolean) => void;
+  takeAttachmentReads: () => ChatAttachmentReadLifecycle;
+  adoptAttachmentReads: (reads: ChatAttachmentReadLifecycle) => void;
 };
 type ComposerOwnerScope = {
   owner: NonNullable<ChatAttachmentGatewayOwner>;
@@ -40,9 +44,10 @@ export class ChatPaneComposerHandoff {
   private readonly presentations: Set<ChatPaneComposerHandoff>;
   private scope: ComposerOwnerScope | null;
   private ownsComposer = true;
+  private custody = Symbol("chat-composer-custody");
 
   constructor(
-    context: ApplicationContext,
+    private readonly context: ApplicationContext,
     private readonly host: ComposerPresentation,
   ) {
     let presentations = composerPresentations.get(context);
@@ -70,6 +75,42 @@ export class ChatPaneComposerHandoff {
     // Most recently presented wins when the same Home appeared in multiple splits.
     this.presentations.delete(this);
     this.presentations.add(this);
+  }
+
+  captureOwner(): ChatComposerRecoveryOwner | undefined {
+    const scope = this.currentScope();
+    if (!scope) {
+      return undefined;
+    }
+    const custody = this.custody;
+    const resolveOwner = () => {
+      const candidates = [this, ...[...this.presentations].toReversed()];
+      for (const candidate of candidates) {
+        if (
+          !this.presentations.has(candidate) ||
+          !candidate.ownsComposer ||
+          candidate.custody !== custody
+        ) {
+          continue;
+        }
+        const current = candidate.currentScope();
+        // Reconnect may retain payload custody; command completion separately
+        // fences draft mutation with its submitted client and connection epoch.
+        if (
+          current &&
+          (current.owner === scope.owner || current.owner.recoveryScopeReady) &&
+          candidate.matchesScope({ ...scope, owner: current.owner })
+        ) {
+          return candidate.host.state();
+        }
+      }
+      return undefined;
+    };
+    return {
+      resolveOwner,
+      retainedAttachmentIds: (attachments) =>
+        this.context.chatAttachmentHandoff.retainedAttachmentIds(attachments),
+    };
   }
 
   dispose(): void {
@@ -161,8 +202,11 @@ export class ChatPaneComposerHandoff {
     sourceState.chatQueuedEdit = null;
     sourceState.chatAttachments = [];
     sourceState.chatComposerFallbackByScope = {};
+    // Pending file reads move with the draft, including Send's preparation gate.
+    target.host.adoptAttachmentReads(this.host.takeAttachmentReads());
     this.ownsComposer = false;
     target.ownsComposer = true;
+    target.custody = this.custody;
     target.scope = target.currentScope();
     target.host.resume();
     sourceState.requestUpdate?.();

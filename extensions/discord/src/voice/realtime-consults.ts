@@ -92,7 +92,6 @@ export class DiscordRealtimeConsults {
       runAgentTurn: (params: VoiceRealtimeAgentTurnParams) => Promise<string>;
       resolveSpeakerContext: (userId: string) => Promise<DiscordVoiceIngressContext | null>;
       stopped: () => boolean;
-      detached?: () => boolean;
       turns: DiscordRealtimeTurns;
       usesRealtimeAgentHandoff: () => boolean;
       wakeNamePolicy: () => RealtimeVoiceWakeNamePolicy;
@@ -142,7 +141,7 @@ export class DiscordRealtimeConsults {
       signal: request.signal,
     });
     request.signal?.throwIfAborted();
-    if (this.params.stopped() && !this.params.detached?.()) {
+    if (this.params.stopped() && this.detachedProviderEpoch === undefined) {
       throw new Error("Discord realtime speaker session is closed");
     }
     return { text };
@@ -221,7 +220,7 @@ export class DiscordRealtimeConsults {
       const recentConsult =
         nativeConsult.kind === "in_flight" || nativeConsult.kind === "already_delivered"
           ? nativeConsult.handle
-          : this.findRecentAgentProxyConsultContext(consultMessage);
+          : this.params.harness.forcedConsults.findRecent(consultMessage);
       if (recentConsult) {
         const recentSpeaker = recentConsult.context?.speaker;
         if (this.params.turns.hasPendingSpeakerAudioContext()) {
@@ -241,10 +240,18 @@ export class DiscordRealtimeConsults {
     if (!context) {
       context = this.params.turns.consumePendingSpeakerContext();
       if (context) {
-        recent = this.rememberRecentAgentProxyConsultContext(consultMessage, context, {
+        recent = this.params.harness.forcedConsults.prepare(consultMessage, {
+          context: {
+            speaker: context,
+            providerEpoch: this.params.providerEpoch(),
+            delivery: "provider",
+          },
           ...(callId === "unknown" ? {} : { id: `native-consult:${callId}` }),
-          started: true,
         });
+        if (!recent) {
+          throw new Error("Discord realtime consult context requires a non-empty question");
+        }
+        this.params.harness.forcedConsults.markStarted(recent);
       }
     }
     const state = recent?.context;
@@ -338,7 +345,11 @@ export class DiscordRealtimeConsults {
     }
     if (usesRealtimeAgentHandoff) {
       if (pendingForcedConsult) {
-        this.schedulePreparedForcedAgentProxyConsult(pendingForcedConsult);
+        this.params.harness.forcedConsults.schedule(
+          pendingForcedConsult,
+          DISCORD_REALTIME_FORCED_CONSULT_FALLBACK_DELAY_MS,
+          (handle) => void this.runForcedAgentProxyConsult(handle),
+        );
       }
       return;
     }
@@ -391,22 +402,26 @@ export class DiscordRealtimeConsults {
     context?: DiscordRealtimeSpeakerContext;
     message: string;
     signal?: AbortSignal;
-    deliveryOwner?: VoiceRealtimeAgentTurnParams["deliveryOwner"];
+    deliveryOwner?: "consult";
   }): Promise<string> {
     const context = params.context;
     if (!context) {
       return "";
     }
     const providerEpoch = this.params.providerEpoch();
-    return this.params.runAgentTurn({
+    const text = await this.params.runAgentTurn({
       context,
       message: params.message,
       toolsAllow: this.params.consultToolsAllow(),
       userId: context.userId,
       isCurrent: () => !this.params.stopped() && providerEpoch === this.params.providerEpoch(),
-      deliveryOwner: params.deliveryOwner,
       ...(params.signal ? { signal: params.signal } : {}),
     });
+    params.signal?.throwIfAborted();
+    if (params.deliveryOwner !== "consult" && this.detachedProviderEpoch === providerEpoch) {
+      this.params.playback.deliverRetainedSpeech(text);
+    }
+    return text;
   }
 
   private prepareForcedAgentProxyConsult(
@@ -430,7 +445,7 @@ export class DiscordRealtimeConsults {
     }
     const context = speakerContext ?? this.params.turns.consumePendingSpeakerContext();
     if (!context) {
-      const recent = this.findRecentAgentProxyConsultContext(question);
+      const recent = this.params.harness.forcedConsults.findRecent(question);
       if (recent) {
         logVoiceVerbose(
           `realtime forced agent consult skipped (already delegated): guild ${this.params.entry.guildId} channel ${this.params.entry.channelId} speaker ${recent.context?.speaker.userId ?? "unknown"}`,
@@ -447,14 +462,6 @@ export class DiscordRealtimeConsults {
         delivery: "provider",
       },
     });
-  }
-
-  private schedulePreparedForcedAgentProxyConsult(pending: AgentProxyConsultHandle): void {
-    this.params.harness.forcedConsults.schedule(
-      pending,
-      DISCORD_REALTIME_FORCED_CONSULT_FALLBACK_DELAY_MS,
-      (handle) => void this.runForcedAgentProxyConsult(handle),
-    );
   }
 
   private async runForcedAgentProxyConsult(pending: AgentProxyConsultHandle): Promise<void> {
@@ -508,28 +515,6 @@ export class DiscordRealtimeConsults {
     }
   }
 
-  private rememberRecentAgentProxyConsultContext(
-    question: string,
-    context: DiscordRealtimeSpeakerContext,
-    options: { id?: string; started?: boolean } = {},
-  ): AgentProxyConsultHandle {
-    const handle = this.params.harness.forcedConsults.prepare(question, {
-      context: {
-        speaker: context,
-        providerEpoch: this.params.providerEpoch(),
-        delivery: "provider",
-      },
-      ...(options.id ? { id: options.id } : {}),
-    });
-    if (!handle) {
-      throw new Error("Discord realtime consult context requires a non-empty question");
-    }
-    if (options.started) {
-      this.params.harness.forcedConsults.markStarted(handle);
-    }
-    return handle;
-  }
-
   private trackAgentProxyConsult(
     recent: AgentProxyConsultHandle | undefined,
     promise: Promise<string>,
@@ -565,12 +550,6 @@ export class DiscordRealtimeConsults {
       state.promise = tracked;
     }
     return tracked;
-  }
-
-  private findRecentAgentProxyConsultContext(
-    consultMessage: string,
-  ): AgentProxyConsultHandle | undefined {
-    return this.params.harness.forcedConsults.findRecent(consultMessage);
   }
 
   private async submitTerminalRealtimeToolResult(

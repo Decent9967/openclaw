@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { runTasksWithConcurrency } from "openclaw/plugin-sdk/concurrency-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import { isPathInside } from "openclaw/plugin-sdk/file-access-runtime";
+import { isPathInside, readFileWindowFully } from "openclaw/plugin-sdk/file-access-runtime";
 import {
   asNullableRecord as readRecord,
   readStringValue,
@@ -307,18 +307,11 @@ async function resolveArtifactFileWithinRoots(params: {
     candidates.push(path.resolve(params.repoRoot, raw));
   }
   for (const candidate of candidates) {
-    const realCandidate = await realpathIfExists(candidate);
-    if (!realCandidate) {
-      continue;
-    }
-    if (
-      !isPathInside(params.repoRoot, realCandidate) &&
-      !isPathInside(params.evidenceDir, realCandidate)
-    ) {
-      continue;
-    }
-    const stats = await fs.stat(realCandidate).catch(() => null);
-    if (stats?.isFile()) {
+    const realCandidate = await resolveContainedFileIfExists(candidate, [
+      params.repoRoot,
+      params.evidenceDir,
+    ]);
+    if (realCandidate) {
       return realCandidate;
     }
   }
@@ -494,14 +487,7 @@ async function readPreview(filePath: string, mediaKind: QaEvidenceArtifactView["
   const handle = await fs.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(TEXT_PREVIEW_BYTES + 1);
-    let bytesRead = 0;
-    while (bytesRead < buffer.length) {
-      const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
-      if (result.bytesRead === 0) {
-        break;
-      }
-      bytesRead += result.bytesRead;
-    }
+    const bytesRead = await readFileWindowFully(handle, buffer, 0);
     const decoder = new StringDecoder("utf8");
     let text = decoder.write(buffer.subarray(0, Math.min(bytesRead, TEXT_PREVIEW_BYTES)));
     // The sentinel distinguishes a capped preview from real EOF. Only real EOF should
@@ -542,9 +528,6 @@ function artifactHref(
   evidencePath: string,
   artifact:
     | {
-        artifactPath: string;
-      }
-    | {
         artifactIndex: number;
         entryIndex: number;
       }
@@ -553,9 +536,7 @@ function artifactHref(
       },
 ) {
   const params = new URLSearchParams({ evidencePath });
-  if ("artifactPath" in artifact) {
-    params.set("artifactPath", artifact.artifactPath);
-  } else if ("producerFile" in artifact) {
+  if ("producerFile" in artifact) {
     params.set("producerFile", artifact.producerFile);
   } else {
     params.set("entryIndex", String(artifact.entryIndex));
@@ -581,12 +562,7 @@ async function buildProducerContextFile(params: {
     href: artifactHref(params.hrefEvidencePath, { producerFile: params.producerFile }),
     path: displayGalleryPath(params.filePath, params),
     preview: await readPreview(realFile, params.previewKind)
-      .then((preview) =>
-        sanitizeGalleryPreview(preview, {
-          extraRoots: params.extraRoots,
-          repoRoot: params.repoRoot,
-        }),
-      )
+      .then((preview) => sanitizeGalleryPreview(preview, params))
       .catch(() => null),
   };
 }
@@ -613,10 +589,7 @@ async function buildArtifactView(params: {
       : null;
   const displayPath =
     (realFileRepoPath ? sanitizeGalleryText(realFileRepoPath, params) : null) ??
-    sanitizeGalleryText(params.artifact.path, {
-      extraRoots: params.extraRoots,
-      repoRoot: params.repoRoot,
-    });
+    sanitizeGalleryText(params.artifact.path, params);
   if (!realFile || !params.allowedArtifactFiles.has(realFile)) {
     return {
       exists: false,
@@ -642,17 +615,9 @@ async function buildArtifactView(params: {
     mediaKind,
     path: displayPath,
     preview: await readPreview(realFile, mediaKind)
-      .then((preview) =>
-        sanitizeGalleryPreview(preview, {
-          extraRoots: params.extraRoots,
-          repoRoot: params.repoRoot,
-        }),
-      )
+      .then((preview) => sanitizeGalleryPreview(preview, params))
       .catch((error: unknown) =>
-        sanitizeGalleryText(`Preview unavailable: ${formatErrorMessage(error)}`, {
-          extraRoots: params.extraRoots,
-          repoRoot: params.repoRoot,
-        }),
+        sanitizeGalleryText(`Preview unavailable: ${formatErrorMessage(error)}`, params),
       ),
     source: sanitizeGalleryText(params.artifact.source, params),
   };
@@ -769,11 +734,7 @@ function readMatrixCells(params: {
     const entry = selected?.entry;
     const artifacts = entry?.execution?.artifacts ?? [];
     const runner = readRecord(cell.runner);
-    const sanitizeCellString = (value: string) =>
-      sanitizeGalleryText(value, {
-        extraRoots: params.extraRoots,
-        repoRoot: params.repoRoot,
-      });
+    const sanitizeCellString = (value: string) => sanitizeGalleryText(value, params);
     const readRunnerString = (value: unknown) => {
       const text = readStringValue(value);
       return text ? sanitizeCellString(text) : null;
@@ -783,12 +744,7 @@ function readMatrixCells(params: {
         artifactKinds: readStringArray(
           artifacts.map((artifact) => sanitizeCellString(artifact.kind)),
         ),
-        artifactPaths: artifacts.map((artifact) =>
-          displayGalleryPath(artifact.path, {
-            extraRoots: params.extraRoots,
-            repoRoot: params.repoRoot,
-          }),
-        ),
+        artifactPaths: artifacts.map((artifact) => displayGalleryPath(artifact.path, params)),
         coverageIds: readStringArray(
           (Array.isArray(cell.coverageIds) ? cell.coverageIds : []).map((coverageId) =>
             typeof coverageId === "string" ? sanitizeCellString(coverageId) : coverageId,
