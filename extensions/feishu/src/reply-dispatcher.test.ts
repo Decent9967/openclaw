@@ -3782,7 +3782,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onItemEvent?.(
+    void result.replyOptions.onItemEvent?.(
       projectAgentToolActivity({
         name: "web_search",
         toolCallId: "search-1",
@@ -3817,7 +3817,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onItemEvent?.(
+    void result.replyOptions.onItemEvent?.(
       projectAgentToolActivity({
         name: "exec",
         toolCallId: "exec-1",
@@ -3840,7 +3840,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       runtime: createRuntimeLogger(),
     });
     await options.onReplyStart?.();
-    result.replyOptions.onItemEvent?.(
+    void result.replyOptions.onItemEvent?.(
       projectAgentToolActivity({
         name: "process",
         toolCallId: "poll-1",
