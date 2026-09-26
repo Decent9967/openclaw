@@ -10,12 +10,23 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../../infra/kysely-sync.js";
+import { executeExistingOpenClawStateRead } from "../../state/openclaw-state-db-readonly.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../../state/openclaw-state-db.generated.js";
 import {
   openExistingOpenClawStateDatabaseReadOnly,
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../../state/openclaw-state-db.js";
+import { resolveChannelIngressStateEnv } from "./ingress-queue-client.js";
+import {
+  FAILED_NULL_PAYLOAD_SENTINEL,
+  parseFailedPayload,
+  baseRecord,
+  decodeClaimColumns,
+  claimedRecord,
+  corruptClaimRecord,
+  completedRecord,
+} from "./ingress-queue.codec.js";
 import type {
   ChannelIngressQueueClaim,
   ChannelIngressQueueClaimRef,
@@ -213,10 +224,6 @@ export type CreateChannelIngressQueueOptions = {
 
 type ChannelIngressDatabase = Pick<OpenClawStateKyselyDatabase, "channel_ingress_events">;
 
-// Failed rows need to distinguish a retained JSON null payload from the "null"
-// scrub marker written by older versions. Invalid JSON cannot collide with enqueue output.
-const FAILED_NULL_PAYLOAD_SENTINEL = "OPENCLAW_CHANNEL_INGRESS_FAILED_NULL_V1";
-
 function normalizePart(value: string | undefined, fallback: string): string {
   const normalized = value?.trim();
   return normalized ? normalized : fallback;
@@ -232,7 +239,7 @@ function createStateDirEnv(
   return env;
 }
 
-export function openChannelIngressDatabase(stateDir?: string) {
+function openChannelIngressDatabase(stateDir?: string) {
   return openOpenClawStateDatabase({
     env: stateDir ? createStateDirEnv(stateDir) : process.env,
   });
@@ -267,7 +274,7 @@ async function openChannelIngressDatabaseForListing(
   };
 }
 
-export function getChannelIngressKysely(db: DatabaseSync) {
+function getChannelIngressKysely(db: DatabaseSync) {
   return getNodeSqliteKysely<ChannelIngressDatabase>(db);
 }
 
@@ -283,90 +290,6 @@ function parseJson(value: string): ParseJsonResult {
   } catch {
     return { ok: false };
   }
-}
-
-function parseFailedPayload(value: string): ParseJsonResult {
-  return value === FAILED_NULL_PAYLOAD_SENTINEL ? { ok: true, value: null } : parseJson(value);
-}
-
-function baseRecord<TPayload, TMetadata>(
-  row: ChannelIngressRow,
-): ChannelIngressQueueRecord<TPayload, TMetadata> | null {
-  const payloadResult = parseJson(row.payload_json);
-  if (!payloadResult.ok) {
-    return null;
-  }
-  const metaResult = row.metadata_json === null ? null : parseJson(row.metadata_json);
-  return {
-    id: row.event_id,
-    channelId: row.channel_id,
-    accountId: row.account_id,
-    queueName: row.queue_name,
-    payload: payloadResult.value as TPayload,
-    ...(metaResult === null || !metaResult.ok ? {} : { metadata: metaResult.value as TMetadata }),
-    receivedAt: row.received_at,
-    updatedAt: row.updated_at,
-    ...(row.lane_key === null ? {} : { laneKey: row.lane_key }),
-    attempts: row.attempts,
-    ...(row.last_attempt_at === null ? {} : { lastAttemptAt: row.last_attempt_at }),
-    ...(row.last_error === null ? {} : { lastError: row.last_error }),
-  };
-}
-
-type ChannelIngressClaimColumns = { token: string; ownerId: string; claimedAt: number };
-
-// A claimant writes token/owner/claimed_at in one UPDATE, and complete/release/
-// refresh all match on claim_token. A claimed row missing any of the three has
-// no reachable owner and could never be released; reject it instead of minting
-// sentinel claim identity that release/liveness checks silently fail against.
-function decodeClaimColumns(row: ChannelIngressRow): ChannelIngressClaimColumns | null {
-  if (!row.claim_token || !row.claim_owner || row.claimed_at === null) {
-    return null;
-  }
-  return { token: row.claim_token, ownerId: row.claim_owner, claimedAt: row.claimed_at };
-}
-
-function claimedRecord<TPayload, TMetadata>(
-  row: ChannelIngressRow,
-): ChannelIngressQueueClaim<TPayload, TMetadata> | null {
-  const claim = decodeClaimColumns(row);
-  const base = claim === null ? null : baseRecord<TPayload, TMetadata>(row);
-  if (claim === null || base === null) {
-    return null;
-  }
-  return { ...base, claim };
-}
-
-function corruptClaimRecord(
-  row: ChannelIngressRow,
-  claim: ChannelIngressClaimColumns,
-): ChannelIngressQueueCorruptClaim {
-  return {
-    id: row.event_id,
-    channelId: row.channel_id,
-    accountId: row.account_id,
-    queueName: row.queue_name,
-    ...(row.lane_key === null ? {} : { laneKey: row.lane_key }),
-    reason: "corrupt_payload",
-    claim,
-  };
-}
-
-function completedRecord<TCompletedMetadata>(
-  row: ChannelIngressRow,
-): ChannelIngressQueueCompletedRecord<TCompletedMetadata> {
-  const metaResult =
-    row.completed_metadata_json === null ? null : parseJson(row.completed_metadata_json);
-  return {
-    id: row.event_id,
-    channelId: row.channel_id,
-    accountId: row.account_id,
-    queueName: row.queue_name,
-    completedAt: row.completed_at ?? row.updated_at,
-    ...(metaResult === null || !metaResult.ok
-      ? {}
-      : { metadata: metaResult.value as TCompletedMetadata }),
-  };
 }
 
 function failedRecord<TPayload, TMetadata>(
@@ -527,53 +450,25 @@ function queueNameForParts(channelId: string, accountId: string): string {
   return JSON.stringify([channelId, accountId]);
 }
 
-/** Lists account ids that hold any ingress rows for a channel, so doctor
- *  migrations can sweep durable state whose account is gone from config. */
-export function listChannelIngressQueueAccountIds(params: {
-  channelId: string;
-  stateDir?: string;
-}): string[] {
-  const channelId = normalizePart(params.channelId, "unknown");
-  const database = openChannelIngressDatabase(params.stateDir);
-  const rows = executeSqliteQuerySync(
-    database.db,
-    getChannelIngressKysely(database.db)
-      .selectFrom("channel_ingress_events")
-      .select("account_id")
-      .distinct()
-      .where("channel_id", "=", channelId)
-      .orderBy("account_id", "asc"),
-  ).rows;
-  return rows.map((row) => row.account_id);
-}
-
-/**
- * Account discovery for callers that must not touch durable state yet. Uses the
- * non-creating read-only opener, so an absent store yields no accounts instead of
- * being created and migrated by the lookup itself.
- */
+/** Account discovery never creates or migrates a missing database. */
 export async function listChannelIngressQueueAccountIdsReadOnly(params: {
   channelId: string;
   stateDir?: string;
 }): Promise<string[]> {
-  const channelId = normalizePart(params.channelId, "unknown");
-  const handle = await openChannelIngressDatabaseForListing(params.stateDir, "read-only");
-  if (!handle) {
+  const reply = await executeExistingOpenClawStateRead(
+    { env: resolveChannelIngressStateEnv(params.stateDir) },
+    {
+      type: "channelIngress.accounts",
+      input: { channelId: normalizePart(params.channelId, "unknown") },
+    },
+  );
+  if (!reply) {
     return [];
   }
-  try {
-    return executeSqliteQuerySync(
-      handle.db,
-      getChannelIngressKysely(handle.db)
-        .selectFrom("channel_ingress_events")
-        .select("account_id")
-        .distinct()
-        .where("channel_id", "=", channelId)
-        .orderBy("account_id", "asc"),
-    ).rows.map((row) => row.account_id);
-  } finally {
-    handle.release();
+  if (!reply.ok || reply.type !== "channelIngress.accounts") {
+    throw new Error("Channel ingress account reader returned an unexpected result");
   }
+  return reply.result;
 }
 
 /** Creates a durable channel/account-scoped ingress queue backed by the OpenClaw state database. */
