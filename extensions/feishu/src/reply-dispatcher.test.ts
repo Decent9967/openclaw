@@ -272,6 +272,39 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     });
   });
 
+  it("never publishes preambles flagged hidden or suppressed from channel progress", async () => {
+    resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial", "feishu"));
+    const { result, options } = createDispatcherHarness();
+    await options.onReplyStart?.();
+
+    await result.replyOptions.onItemEvent?.({
+      itemId: "p1",
+      kind: "preamble",
+      progressText: "visible narration",
+    });
+    await result.replyOptions.onItemEvent?.({
+      itemId: "p2",
+      kind: "preamble",
+      progressText: "hidden narration",
+      hideFromChannelProgress: true,
+    });
+    await result.replyOptions.onItemEvent?.({
+      itemId: "p3",
+      kind: "preamble",
+      progressText: "suppressed narration",
+      suppressChannelProgress: true,
+    });
+    await options.onIdle?.();
+
+    const session = requireStreamingInstance(0);
+    const NL_MARK = String.fromCharCode(10);
+    const calls = session.update.mock.calls.map((args: unknown[]) => String(args[0]));
+    const joined = calls.join(NL_MARK);
+    expect(joined).toContain("visible narration");
+    expect(joined).not.toContain("hidden narration");
+    expect(joined).not.toContain("suppressed narration");
+  });
+
   it("reopens the progress gate for a turn admitted after a queued settlement", async () => {
     resolveFeishuAccountMock.mockReturnValue(createReplyAccount("card", "partial", "feishu"));
     const { result, options } = createDispatcherHarness();

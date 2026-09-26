@@ -1720,6 +1720,14 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               // identity for id-less snapshot streams, and keyed retraction on
               // an empty update — so partial mode delegates instead of
               // rebuilding a parallel 💬 line here.
+              // Hidden or suppressed preambles never publish; this matches
+              // the SDK item router's visibility filtering used below.
+              if (
+                payload.hideFromChannelProgress === true ||
+                payload.suppressChannelProgress === true
+              ) {
+                return false;
+              }
               return progressCompositor.pushCommentaryProgress(payload.progressText, {
                 itemId: payload.itemId,
               });
