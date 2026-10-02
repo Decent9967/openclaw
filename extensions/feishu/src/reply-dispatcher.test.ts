@@ -280,19 +280,28 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     await result.replyOptions.onItemEvent?.({
       itemId: "p1",
       kind: "preamble",
-      progressText: "visible narration",
+      progressText: "first narration line that is long enough for the render gate",
     });
     await result.replyOptions.onItemEvent?.({
       itemId: "p2",
       kind: "preamble",
-      progressText: "hidden narration",
+      progressText: "hidden narration line that must never reach the card",
       hideFromChannelProgress: true,
     });
     await result.replyOptions.onItemEvent?.({
       itemId: "p3",
       kind: "preamble",
-      progressText: "suppressed narration",
+      progressText: "suppressed narration line that must never reach the card",
       suppressChannelProgress: true,
+    });
+    // The same item turning hidden must retract its already-rendered line:
+    // the SDK contract retires the preview when its last line is retracted,
+    // so the card is discarded and the retracted text never renders again.
+    await result.replyOptions.onItemEvent?.({
+      itemId: "p1",
+      kind: "preamble",
+      progressText: "first narration line that is long enough for the render gate",
+      hideFromChannelProgress: true,
     });
     await options.onIdle?.();
 
@@ -300,9 +309,17 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     const NL_MARK = String.fromCharCode(10);
     const calls = session.update.mock.calls.map((args: unknown[]) => String(args[0]));
     const joined = calls.join(NL_MARK);
-    expect(joined).toContain("visible narration");
-    expect(joined).not.toContain("hidden narration");
-    expect(joined).not.toContain("suppressed narration");
+    expect(joined).toContain("first narration line that is long");
+    expect(joined).not.toContain("hidden narration line");
+    expect(joined).not.toContain("suppressed narration line");
+    expect(session.discard).toHaveBeenCalled();
+    const afterRetractIndex = calls.findIndex((text) =>
+      text.includes("first narration line that is long"),
+    );
+    const rendersAfterRetraction = calls.slice(afterRetractIndex + 1);
+    for (const render of rendersAfterRetraction) {
+      expect(render).not.toContain("first narration line that is long");
+    }
   });
 
   it("reopens the progress gate for a turn admitted after a queued settlement", async () => {
