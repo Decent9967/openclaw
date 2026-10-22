@@ -442,6 +442,75 @@ describe("FeishuConfigSchema optimization flags", () => {
   });
 });
 
+describe("FeishuConfigSchema streaming.finalize upgrade compatibility", () => {
+  // A stored config shaped exactly like a pre-finalize build: the full legacy
+  // streaming surface, no `finalize` key. It must keep loading unchanged so
+  // existing stored settings survive the upgrade; the runtime resolves the
+  // absent key to the documented "overwrite" default, which matches the
+  // pre-PR final-card disposition (reply-dispatcher tests cover that half).
+  const legacyStoredConfig = {
+    connectionMode: "websocket",
+    dmPolicy: "pairing",
+    groupPolicy: "allowlist",
+    streaming: {
+      mode: "partial",
+      chunkMode: "newline",
+      block: { enabled: true, coalesce: { idleMs: 250 } },
+    },
+    accounts: {
+      main: {
+        streaming: { mode: "partial", block: { enabled: false } },
+      },
+    },
+  };
+
+  it("loads pre-finalize stored configs unchanged at both scopes", () => {
+    const result = FeishuConfigSchema.parse(legacyStoredConfig);
+    expect(result.streaming).toEqual(legacyStoredConfig.streaming);
+    expect(result.accounts?.main?.streaming).toEqual(legacyStoredConfig.accounts.main.streaming);
+    expect(result.streaming?.finalize).toBeUndefined();
+    expect(result.accounts?.main?.streaming?.finalize).toBeUndefined();
+
+    const exported = validateJsonSchemaValue({
+      schema: FeishuChannelConfigSchema.schema,
+      cacheKey: "feishu-finalize-upgrade-compat",
+      value: legacyStoredConfig,
+      applyDefaults: true,
+    });
+    expect(exported.ok, "exported JSON Schema validation").toBe(true);
+    if (exported.ok) {
+      expect(exported.value.streaming?.finalize).toBeUndefined();
+      expect(exported.value.accounts?.main?.streaming?.finalize).toBeUndefined();
+    }
+  });
+
+  it("adds finalize as an optional enum only at both scopes", () => {
+    const result = FeishuConfigSchema.parse({
+      streaming: { finalize: "append" },
+      accounts: { main: { streaming: { finalize: "overwrite" } } },
+    });
+    expect(result.streaming?.finalize).toBe("append");
+    expect(result.accounts?.main?.streaming?.finalize).toBe("overwrite");
+    expect(FeishuConfigSchema.safeParse({ streaming: { finalize: "keep" } }).success).toBe(false);
+    expect(FeishuChannelConfigSchema.schema).toMatchObject({
+      properties: {
+        streaming: {
+          properties: { finalize: { enum: ["overwrite", "append"], type: "string" } },
+        },
+        accounts: {
+          additionalProperties: {
+            properties: {
+              streaming: {
+                properties: { finalize: { enum: ["overwrite", "append"], type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+});
+
 describe("FeishuConfigSchema TTS overrides", () => {
   it("accepts top-level and account-level TTS overrides", () => {
     const result = FeishuConfigSchema.parse({
