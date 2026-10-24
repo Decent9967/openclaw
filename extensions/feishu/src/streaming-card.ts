@@ -255,7 +255,6 @@ export class FeishuStreamingSession {
 
   private async writeCardContent(
     text: string,
-    replace: boolean,
     onError?: (error: unknown) => void,
   ): Promise<boolean> {
     if (!this.state) {
@@ -264,22 +263,16 @@ export class FeishuStreamingSession {
     this.state.sequence += 1;
     try {
       await this.requestCardKit(
-        `/${this.state.cardId}/elements/content${replace ? "" : "/content"}`,
-        replace ? "replace" : "update",
+        `/${this.state.cardId}/elements/content/content`,
+        "update",
         "PUT",
         () => ({
-          ...(replace
-            ? { element: JSON.stringify({ tag: "markdown", content: text, element_id: "content" }) }
-            : { content: text }),
+          content: text,
           sequence: this.state!.sequence,
-          uuid: `${replace ? "r" : "s"}_${this.state!.cardId}_${this.state!.sequence}`,
+          uuid: `s_${this.state!.cardId}_${this.state!.sequence}`,
         }),
         (response, auditContext) =>
-          assertSuccessfulCardKitResponse(
-            response,
-            auditContext,
-            replace ? "Replace card content" : "Update card content",
-          ),
+          assertSuccessfulCardKitResponse(response, auditContext, "Update card content"),
       );
       return true;
     } catch (error) {
@@ -326,7 +319,7 @@ export class FeishuStreamingSession {
         if (nextText === this.state.sentText) {
           return;
         }
-        const sent = await this.writeCardContent(nextText, false, (e) =>
+        const sent = await this.writeCardContent(nextText, (e) =>
           this.log?.(`Update failed: ${String(e)}`),
         );
         if (sent && this.state) {
@@ -434,10 +427,15 @@ export class FeishuStreamingSession {
     // Only send final update if content differs from what's already displayed.
     // An explicit empty final text clears a transient preview before closeout.
     if ((text || finalText !== undefined) && text !== this.state.sentText) {
-      const replace = !text.startsWith(this.state.sentText);
-      const sent = await this.writeCardContent(text, replace, (e) => {
+      // Always publish through the content-level form: live CardKit accepts
+      // element-level replaces with code 0 but never applies them while
+      // streaming_mode is on, and a progress-draft final diverges from the
+      // last streamed snapshot by construction, so the element form would
+      // freeze the card on that snapshot (observed on production CardKit;
+      // https://github.com/openclaw/openclaw/pull/148176#issuecomment-6377376895).
+      const sent = await this.writeCardContent(text, (e) => {
         finalWriteError = e;
-        this.log?.(`Final ${replace ? "replace" : "update"} failed: ${String(e)}`);
+        this.log?.(`Final update failed: ${String(e)}`);
       });
       this.state.currentText = text;
       if (sent) {

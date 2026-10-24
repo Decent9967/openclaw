@@ -309,7 +309,9 @@ describe("FeishuStreamingSession", () => {
       return jsonResponse(
         params.rejectClose && url.pathname.endsWith("/settings")
           ? { code: 91400, msg: "close rejected" }
-          : params.rejectClear && url.pathname.endsWith("/elements/content")
+          : params.rejectClear &&
+              url.pathname.endsWith("/elements/content/content") &&
+              (JSON.parse(body) as { content?: string }).content === ""
             ? { code: 19002, msg: "clear rejected" }
             : { code: 0, msg: "ok" },
       );
@@ -394,14 +396,10 @@ describe("FeishuStreamingSession", () => {
     expect(remove).not.toHaveBeenCalled();
     expect(requests.map(({ path }) => path)).toEqual([
       "/open-apis/cardkit/v1/cards/card_accepted/elements/content/content",
-      "/open-apis/cardkit/v1/cards/card_accepted/elements/content",
+      "/open-apis/cardkit/v1/cards/card_accepted/elements/content/content",
       "/open-apis/cardkit/v1/cards/card_accepted/settings",
     ]);
-    expect(JSON.parse(String(requests[1]?.body.element))).toEqual({
-      tag: "markdown",
-      content: "",
-      element_id: "content",
-    });
+    expect(requests[1]?.body).toMatchObject({ content: "" });
     expect(session.isActive()).toBe(false);
   });
 
@@ -990,10 +988,9 @@ describe("FeishuStreamingSession", () => {
 
     await session.closeWithResult();
 
-    expect(updateBodies).toHaveLength(0);
-    expect(replaceBodies).toHaveLength(1);
-    const payload = JSON.parse(replaceBodies[0] ?? "{}") as { element?: string };
-    expect(JSON.parse(payload.element ?? "{}")).toMatchObject({ content: next });
+    expect(updateBodies).toHaveLength(1);
+    expect(replaceBodies).toHaveLength(0);
+    expect(JSON.parse(updateBodies[0] ?? "{}")).toMatchObject({ content: next });
   });
 
   it("retains prior visible content when CardKit rejects a divergent close replacement", async () => {
@@ -1021,7 +1018,7 @@ describe("FeishuStreamingSession", () => {
           expire: 7200,
         });
       }
-      if (url.pathname.endsWith("/elements/content")) {
+      if (url.pathname.endsWith("/elements/content/content")) {
         replaceBodies.push(body);
         return jsonResponse({ code: 19_002, msg: "replacement rejected" });
       }
@@ -1059,7 +1056,7 @@ describe("FeishuStreamingSession", () => {
     expect(settings.config?.summary?.content).toBe(previous.replaceAll("\n", " ").trim());
     expect(settings.config?.summary?.content).not.toContain("Thinking two");
     expect(log).toHaveBeenCalledWith(
-      "Final replace failed: Error: Replace card content failed: replacement rejected (code=19002)",
+      "Final update failed: Error: Update card content failed: replacement rejected (code=19002)",
     );
   });
 
@@ -1212,7 +1209,7 @@ describe("FeishuStreamingSession", () => {
     });
   });
 
-  it("replaces content when final text removes transient streamed status", async () => {
+  it("rewrites streamed content when the final text drops transient status", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(4_000);
     const updateBodies: string[] = [];
@@ -1242,24 +1239,12 @@ describe("FeishuStreamingSession", () => {
 
     await session.closeWithResult("final answer");
 
-    expect(updateBodies).toHaveLength(0);
-    expect(replaceBodies).toHaveLength(1);
-    const replacePayload = JSON.parse(replaceBodies[0] ?? "{}") as {
-      element?: string;
-      sequence?: number;
-      uuid?: string;
-    };
-    expect({
-      ...replacePayload,
-      element: JSON.parse(replacePayload.element ?? "{}"),
-    }).toEqual({
-      element: {
-        tag: "markdown",
-        content: "final answer",
-        element_id: "content",
-      },
+    expect(updateBodies).toHaveLength(1);
+    expect(replaceBodies).toHaveLength(0);
+    expect(JSON.parse(updateBodies[0] ?? "{}")).toEqual({
+      content: "final answer",
       sequence: 2,
-      uuid: "r_card_4_2",
+      uuid: "s_card_4_2",
     });
   });
 
@@ -1323,18 +1308,12 @@ describe("FeishuStreamingSession", () => {
     expect(summary.charCodeAt(summary.length - 4)).not.toBe(0xd83d);
   });
 
-  it("logs a final replacement failure when CardKit returns non-OK", async () => {
+  it("logs a final content-write failure when CardKit returns non-OK", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(4_500);
     const updateBodies: string[] = [];
     const replaceBodies: string[] = [];
-    const deps = mockFetches(
-      updateBodies,
-      new Set<number>(),
-      replaceBodies,
-      new Map<number, number>(),
-      new Map([[0, 500]]),
-    );
+    const deps = mockFetches(updateBodies, new Set<number>(), replaceBodies, new Map([[0, 500]]));
     const log = vi.fn();
 
     const session = new FeishuStreamingSession(
@@ -1363,10 +1342,10 @@ describe("FeishuStreamingSession", () => {
       result: { visibleReplySent: true, content: "working\n\nfinal answer" },
     });
 
-    expect(updateBodies).toHaveLength(0);
-    expect(replaceBodies).toHaveLength(1);
+    expect(updateBodies).toHaveLength(1);
+    expect(replaceBodies).toHaveLength(0);
     expect(log).toHaveBeenCalledWith(
-      "Final replace failed: Error: Replace card content failed with HTTP 500",
+      "Final update failed: Error: Update card content failed with HTTP 500",
     );
   });
 
